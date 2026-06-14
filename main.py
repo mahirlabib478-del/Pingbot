@@ -53,6 +53,9 @@ deposit_sessions = {}
 buy_sessions = set()
 add_stock_sessions = {}
 
+# Loss Recovery
+loss_recovery_sessions = {}
+
 # Channel backup
 last_message_id = None
 channel_lock = threading.RLock()
@@ -218,6 +221,19 @@ def send_telegram_document(file_bytes, filename, chat_id):
     except Exception as e:
         print(f"Document send error: {e}")
 
+def forward_telegram_document(chat_id, from_chat_id, message_id):
+    """Forward a document by file_id"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
+    payload = {
+        "chat_id": chat_id,
+        "from_chat_id": from_chat_id,
+        "message_id": message_id
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Forward error: {e}")
+
 def broadcast_message(text):
     for chat_id in list(subscribed_users):
         send_telegram_message(text, chat_id)
@@ -283,7 +299,8 @@ def get_keyboard(chat_id):
         ["💰 ব্যালেন্স", "💸 ডিপোজিট"],
         ["🛒 একাউন্ট কিনুন"],
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
-        ["📞 সাপোর্ট", "🛑 স্টপ"]
+        ["📞 সাপোর্ট", "🛑 স্টপ"],
+        ["🔄 লস রিকভারি"]                   # নতুন বাটন
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         keyboard.append(["📥 ডিপোজিট রিকোয়েস্ট", "➕ স্টক যোগ করুন"])
@@ -452,6 +469,135 @@ def process_submission_step(chat_id, text, sender_username):
         send_main_keyboard(chat_id)
         return True
     return False
+
+# ================== LOSS RECOVERY HANDLER ==================
+def start_loss_recovery(chat_id):
+    loss_recovery_sessions[chat_id] = {
+        "step": "usernames",
+        "data": {}
+    }
+    send_telegram_message(
+        "⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
+        "অনুগ্রহ করে সঠিক তথ্য দিন।\n\n"
+        "আপনার কেনা অ্যাকাউন্টগুলোর ইউজারনেম লিস্ট দিন (প্রতি লাইনে একটি):",
+        chat_id
+    )
+
+def process_loss_recovery_step(chat_id, text):
+    if chat_id not in loss_recovery_sessions:
+        return False
+    session = loss_recovery_sessions[chat_id]
+    step = session["step"]
+
+    if text.strip().lower() == "/cancel":
+        del loss_recovery_sessions[chat_id]
+        send_telegram_message("❌ লস রিকভারি বাতিল করা হয়েছে।", chat_id)
+        send_main_keyboard(chat_id)
+        return True
+
+    if step == "usernames":
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if not lines:
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
+            return True
+        session["data"]["usernames"] = lines
+        session["step"] = "cookie_date"
+        send_telegram_message(
+            "📅 কত তারিখে কুকিজ সাবমিট করেছিলেন? (শুধু তারিখের সংখ্যা লিখুন, যেমন: 13 বা 26)",
+            chat_id
+        )
+        return True
+
+    elif step == "cookie_date":
+        date_str = text.strip()
+        if not date_str.isdigit():
+            send_telegram_message("⚠️ দয়া করে শুধু সংখ্যা দিন (13, 26 ইত্যাদি)।", chat_id)
+            return True
+        session["data"]["cookie_date"] = date_str
+        session["step"] = "report_file"
+        send_telegram_message(
+            "📎 এখন রিপোর্ট ফেইল হওয়ার দিনের রিপোর্ট ফাইলটি দিন (স্ক্রিনশট/ডকুমেন্ট)।",
+            chat_id
+        )
+        return True
+
+    elif step == "report_file":
+        # If user sends text instead of file, remind them
+        send_telegram_message("⚠️ দয়া করে একটি ফাইল/স্ক্রিনশট পাঠান, টেক্সট নয়।", chat_id)
+        return True
+
+    elif step == "bkash":
+        bkash = text.strip()
+        if not bkash:
+            send_telegram_message("⚠️ বিকাশ নম্বর খালি রাখা যাবে না।", chat_id)
+            return True
+        session["data"]["bkash"] = bkash
+        session["step"] = "whatsapp"
+        send_telegram_message("📞 আপনার হোয়াটসঅ্যাপ নম্বর দিন:", chat_id)
+        return True
+
+    elif step == "whatsapp":
+        whatsapp = text.strip()
+        if not whatsapp:
+            send_telegram_message("⚠️ হোয়াটসঅ্যাপ নম্বর দিন।", chat_id)
+            return True
+        session["data"]["whatsapp"] = whatsapp
+
+        # সব তথ্য অ্যাডমিনকে পাঠাই
+        usernames = session["data"]["usernames"]
+        cookie_date = session["data"]["cookie_date"]
+        bkash = session["data"]["bkash"]
+        file_id = session["data"].get("report_file_id")
+        file_message_id = session["data"].get("report_message_id")
+
+        # অ্যাডমিনকে মেসেজ
+        admin_text = (
+            "🔄 **নতুন লস রিকভারি রিকোয়েস্ট**\n\n"
+            f"👤 ইউজার: {user_info.get(chat_id, chat_id)} (`{chat_id}`)\n"
+            f"📅 কুকি সাবমিটের তারিখ: {cookie_date}\n"
+            f"💳 বিকাশ: {bkash}\n"
+            f"📞 হোয়াটসঅ্যাপ: {whatsapp}\n"
+            f"🔑 ইউজারনেম: " + ", ".join(usernames)
+        )
+        send_telegram_message(admin_text, ADMIN_CHAT_ID, parse_mode="Markdown")
+
+        # রিপোর্ট ফাইল ফরওয়ার্ড (যদি থাকে)
+        if file_message_id:
+            forward_telegram_document(ADMIN_CHAT_ID, chat_id, file_message_id)
+        elif file_id:
+            # সরাসরি ফাইল আইডি দিয়েও পাঠানো যায়, কিন্তু ফরওয়ার্ডই নিরাপদ
+            send_telegram_message("⚠️ রিপোর্ট ফাইল ফরওয়ার্ড করা যায়নি, কারণ মেসেজ আইডি পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
+        # ইউজারকে কনফার্মেশন
+        send_telegram_message(
+            "✅ আপনার লস রিকভারি রিকোয়েস্ট জমা হয়েছে। অ্যাডমিন শীঘ্রই আপনার সাথে যোগাযোগ করবে।",
+            chat_id
+        )
+        del loss_recovery_sessions[chat_id]
+        send_main_keyboard(chat_id)
+        return True
+    return False
+
+def handle_loss_recovery_file(chat_id, message):
+    """যখন ইউজার 'রিপোর্ট ফাইল' স্টেপে ফাইল পাঠায়"""
+    if chat_id not in loss_recovery_sessions:
+        return
+    session = loss_recovery_sessions[chat_id]
+    if session["step"] != "report_file":
+        return  # এখন ফাইল আসার কথা নয়, ইগনোর
+
+    doc = message.get("document")
+    if not doc:
+        send_telegram_message("⚠️ দয়া করে একটি ফাইল পাঠান।", chat_id)
+        return
+
+    file_id = doc.get("file_id")
+    message_id = message.get("message_id")
+
+    session["data"]["report_file_id"] = file_id
+    session["data"]["report_message_id"] = message_id
+    session["step"] = "bkash"
+    send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
 # ================== FREE MOTHER ACCOUNT ==================
 def handle_addmother(chat_id, args):
@@ -630,17 +776,15 @@ def handle_backup(chat_id):
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
 
-    # আগের মতো ফাইল ও চ্যানেলে ব্যাকআপ আপডেট
     save_all()
 
-    # ব্যাকআপ JSON তৈরি
     backup = {
         "subscribed_users": list(subscribed_users),
         "user_info": user_info,
         "pushed_hashes": list(pushed_hashes),
         "mother_accounts": mother_accounts,
         "user_cooldowns": user_last_request,
-        "accounts": accounts,          # restore এ market_accounts / accounts fallback আছে
+        "accounts": accounts,
         "balances": balances,
         "deposits": deposits,
         "config": config,
@@ -648,8 +792,6 @@ def handle_backup(chat_id):
     }
     backup_json = json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')
     filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-    # ফাইল অ্যাডমিনকে পাঠানো
     send_telegram_document(backup_json, filename, ADMIN_CHAT_ID)
     send_telegram_message("✅ ব্যাকআপ ফাইল তৈরি ও পাঠানো হয়েছে। /restore এর মাধ্যমে এটি ব্যবহার করুন।", chat_id)
 
@@ -1088,13 +1230,18 @@ def handle_telegram_commands():
 
                         user_info[chat_id] = sender_username
                         save_user_info()
-                        save_data_to_channel()  # প্রতিবার ইউজার ইন্টার‍্যাকশনে চ্যানেল আপডেট
+                        save_data_to_channel()
 
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। পরে চেষ্টা করুন।", chat_id)
                             continue
 
-                        # Document for restore
+                        # লস রিকভারি ফাইল হ্যান্ডলিং (ডকুমেন্ট আসলে)
+                        if "document" in msg and chat_id in loss_recovery_sessions:
+                            handle_loss_recovery_file(chat_id, msg)
+                            continue
+
+                        # Restore file handling (admin)
                         if "document" in msg:
                             caption = msg.get("caption", "")
                             if caption.strip().lower() == "/restore":
@@ -1129,6 +1276,11 @@ def handle_telegram_commands():
                         # Add stock flow (admin)
                         if chat_id in add_stock_sessions:
                             process_add_stock_step(chat_id, text)
+                            continue
+
+                        # Loss recovery text handling
+                        if chat_id in loss_recovery_sessions:
+                            process_loss_recovery_step(chat_id, text)
                             continue
 
                         # Buy session (waiting for quantity)
@@ -1209,6 +1361,9 @@ def handle_telegram_commands():
                                     chat_id
                                 )
                             send_main_keyboard(chat_id)
+                            continue
+                        elif text == "🔄 লস রিকভারি":
+                            start_loss_recovery(chat_id)
                             continue
 
                         # --- Text Commands ---

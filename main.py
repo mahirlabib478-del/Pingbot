@@ -563,28 +563,45 @@ def process_loss_recovery_step(chat_id, text):
 
 def handle_loss_recovery_file(chat_id, message):
     """যখন ইউজার 'রিপোর্ট ফাইল' স্টেপে ফাইল পাঠায়"""
+
     if chat_id not in loss_recovery_sessions:
         return
+
     session = loss_recovery_sessions[chat_id]
+
     if session["step"] != "report_file":
+        return
+
+    doc = message.get("document")
+
+    if not doc:
+        send_telegram_message(
+            "⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।",
+            chat_id
+        )
         return
 
     file_name = doc.get("file_name", "").lower()
 
     if not (file_name.endswith(".xlsx") or file_name.endswith(".xls")):
-    send_telegram_message(
-        "❌ শুধুমাত্র Excel File (.xlsx বা .xls) গ্রহণ করা হবে।\n"
-        "স্ক্রিনশট, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
-        chat_id
-    )
-    return
+        send_telegram_message(
+            "❌ শুধুমাত্র Excel File (.xlsx বা .xls) গ্রহণ করা হবে।\n"
+            "স্ক্রিনশট, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
+            chat_id
+        )
+        return
 
     file_id = doc.get("file_id")
     message_id = message.get("message_id")
+
     session["data"]["report_file_id"] = file_id
     session["data"]["report_message_id"] = message_id
     session["step"] = "bkash"
-    send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
+
+    send_telegram_message(
+        "💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):",
+        chat_id
+    )
 
 # ================== FREE MOTHER ACCOUNT ==================
 def handle_addmother(chat_id, args):

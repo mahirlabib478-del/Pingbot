@@ -629,8 +629,29 @@ def handle_backup(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
+
+    # আগের মতো ফাইল ও চ্যানেলে ব্যাকআপ আপডেট
     save_all()
-    send_telegram_message("✅ ব্যাকআপ ফাইল জেনারেট এবং চ্যানেলে পাঠানো হয়েছে।", chat_id)
+
+    # ব্যাকআপ JSON তৈরি
+    backup = {
+        "subscribed_users": list(subscribed_users),
+        "user_info": user_info,
+        "pushed_hashes": list(pushed_hashes),
+        "mother_accounts": mother_accounts,
+        "user_cooldowns": user_last_request,
+        "accounts": accounts,          # restore এ market_accounts / accounts fallback আছে
+        "balances": balances,
+        "deposits": deposits,
+        "config": config,
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+    backup_json = json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')
+    filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    # ফাইল অ্যাডমিনকে পাঠানো
+    send_telegram_document(backup_json, filename, ADMIN_CHAT_ID)
+    send_telegram_message("✅ ব্যাকআপ ফাইল তৈরি ও পাঠানো হয়েছে। /restore এর মাধ্যমে এটি ব্যবহার করুন।", chat_id)
 
 def handle_restore(chat_id, file_id):
     if str(chat_id) != ADMIN_CHAT_ID:

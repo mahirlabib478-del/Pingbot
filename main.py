@@ -910,6 +910,28 @@ def handle_market_admin(chat_id, text):
                     return True
             send_telegram_message(f"❌ `{arg}` নামে কোনো অ্যাকাউন্ট পাওয়া যায়নি।", chat_id)
             return True
+    elif cmd == "/bulkdelete":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /bulkdelete <সংখ্যা>\nউদাহরণ: /bulkdelete 5 (প্রথম 5 টি অ্যাকাউন্ট ডিলিট হবে)", chat_id)
+            return True
+        arg = parts[1].strip()
+        try:
+            count = int(arg)
+            if count <= 0:
+                raise ValueError
+        except:
+            send_telegram_message("❌ সঠিক সংখ্যা দিন (পজিটিভ পূর্ণসংখ্যা)।", chat_id)
+            return True
+        if count > len(accounts):
+            send_telegram_message(f"❌ স্টকে মোট {len(accounts)} টি অ্যাকাউন্ট আছে। আপনি {count} টি ডিলিট করতে পারবেন না।", chat_id)
+            return True
+        deleted = accounts[:count]
+        del accounts[:count]
+        save_accounts()
+        save_data_to_channel()
+        usernames = [acc['username'] for acc in deleted]
+        send_telegram_message(f"✅ স্টক থেকে প্রথম {count} টি অ্যাকাউন্ট ডিলিট করা হয়েছে:\n" + "\n".join(usernames), chat_id)
+        return True
     elif cmd == "/setprice":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /setprice <মূল্য>", chat_id)
@@ -1161,6 +1183,7 @@ def handle_telegram_commands():
                                 send_telegram_message(
                                     "🗑️ স্টক ডিলিট করতে কমান্ড ব্যবহার করুন:\n"
                                     "/deletestock <ইনডেক্স> বা /deletestock <ইউজারনেম>\n"
+                                    "একাধিক একসাথে ডিলিট: /bulkdelete <সংখ্যা>\n"
                                     "স্টক দেখতে /stock দিন।",
                                     chat_id
                                 )

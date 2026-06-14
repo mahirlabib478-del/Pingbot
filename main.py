@@ -499,14 +499,18 @@ def process_loss_recovery_step(chat_id, text):
         session["data"]["cookie_date"] = date_str
         session["step"] = "report_file"
         send_telegram_message(
-            "📎 এখন রিপোর্ট ফেইল হওয়ার দিনের রিপোর্ট ফাইলটি দিন (স্ক্রিনশট/ডকুমেন্ট)।",
+            "📎 এখন রিপোর্ট ফেইল হওয়ার দিনের Excel Report File (.xlsx/.xls) পাঠান।\n\n"
+            "⚠️ Screenshot, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
             chat_id
         )
         return True
 
     elif step == "report_file":
         # If user sends text instead of file, remind them
-        send_telegram_message("⚠️ দয়া করে একটি ফাইল/স্ক্রিনশট পাঠান, টেক্সট নয়।", chat_id)
+        send_telegram_message(
+            "⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।",
+             chat_id
+        )
         return True
 
     elif step == "bkash":
@@ -565,10 +569,15 @@ def handle_loss_recovery_file(chat_id, message):
     if session["step"] != "report_file":
         return
 
-    doc = message.get("document")
-    if not doc:
-        send_telegram_message("⚠️ দয়া করে একটি ফাইল পাঠান।", chat_id)
-        return
+    file_name = doc.get("file_name", "").lower()
+
+    if not (file_name.endswith(".xlsx") or file_name.endswith(".xls")):
+    send_telegram_message(
+        "❌ শুধুমাত্র Excel File (.xlsx বা .xls) গ্রহণ করা হবে।\n"
+        "স্ক্রিনশট, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
+        chat_id
+    )
+    return
 
     file_id = doc.get("file_id")
     message_id = message.get("message_id")

@@ -222,16 +222,6 @@ def broadcast_message(text):
     for chat_id in list(subscribed_users):
         send_telegram_message(text, chat_id)
 
-# ================== GROUP NOTIFICATION ==================
-def send_group_notification(text):
-    """গ্রুপ চ্যাটে নোটিফিকেশন পাঠায়, যদি group_chat_id সেট করা থাকে"""
-    group_id = config.get("group_chat_id", "")
-    if group_id:
-        try:
-            send_telegram_message(text, group_id)
-        except Exception as e:
-            print(f"Group notification error: {e}")
-
 # ================== CHANNEL BACKUP ==================
 def save_data_to_channel():
     global last_message_id
@@ -458,8 +448,6 @@ def process_submission_step(chat_id, text, sender_username):
             "✅ আপনার অ্যাকাউন্ট সফলভাবে জমা হয়েছে।\n\nঅ্যাডমিন শীঘ্রই যোগাযোগ করবে। ধন্যবাদ! 🙏",
             chat_id
         )
-        # 🔔 গ্রুপে নোটিফিকেশন
-        send_group_notification(f"📋 {tg_username} ({chat_id}) অ্যাকাউন্ট জমা দিয়েছে।")
         del submission_sessions[chat_id]
         send_main_keyboard(chat_id)
         return True
@@ -495,7 +483,7 @@ def handle_addmother(chat_id, args):
     save_data_to_channel()
     send_telegram_message(f"✅ মাদার অ্যাকাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
-def handle_getmother(chat_id, sender_username):
+def handle_getmother(chat_id):
     now = time.time()
     last = user_last_request.get(str(chat_id), 0)
     cooldown = 600
@@ -524,8 +512,6 @@ def handle_getmother(chat_id, sender_username):
             if acc["fa_key"]:
                 msg += f"\n🔐 2FA Key: {acc['fa_key']}"
             send_telegram_message(msg, chat_id)
-            # 🔔 গ্রুপে নোটিফিকেশন
-            send_group_notification(f"🎁 {sender_username} ({chat_id}) একটি মাদার অ্যাকাউন্ট নিয়েছে।")
             send_main_keyboard(chat_id)
             return
     send_telegram_message("❌ কোনো মাদার অ্যাকাউন্ট উপলব্ধ নেই। পরে আবার চেষ্টা করুন।", chat_id)
@@ -779,7 +765,7 @@ def start_deposit(chat_id):
         chat_id
     )
 
-def process_deposit_step(chat_id, text, sender_username):
+def process_deposit_step(chat_id, text):
     if chat_id not in deposit_sessions:
         return False
     session = deposit_sessions[chat_id]
@@ -823,7 +809,7 @@ def process_deposit_step(chat_id, text, sender_username):
         admin_msg = (
             f"📥 নতুন ডিপোজিট রিকোয়েস্ট\n"
             f"আইডি: {deposit_id}\n"
-            f"ইউজার: {sender_username} ({chat_id})\n"
+            f"ইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\n"
             f"পরিমাণ: {amount} টাকা\n"
             f"ট্রানজেকশন আইডি: {trxid}\n"
             f"অনুমোদন করতে: /approve {deposit_id}\n"
@@ -835,13 +821,11 @@ def process_deposit_step(chat_id, text, sender_username):
             f"অ্যাডমিন অনুমোদন করলেই আপনার ব্যালেন্সে যোগ হবে।",
             chat_id
         )
-        # 🔔 গ্রুপে নোটিফিকেশন
-        send_group_notification(f"💸 {sender_username} ({chat_id}) {amount} টাকার ডিপোজিট রিকোয়েস্ট করেছে।")
         send_main_keyboard(chat_id)
         return True
     return False
 
-def handle_buy(chat_id, quantity, sender_username):
+def handle_buy(chat_id, quantity):
     try:
         qty = int(quantity)
         if qty <= 0:
@@ -879,10 +863,8 @@ def handle_buy(chat_id, quantity, sender_username):
         f"অবশিষ্ট ব্যালেন্স: {balances[chat_id]} টাকা",
         chat_id
     )
-    admin_msg = f"🛒 {sender_username} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
+    admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
     send_telegram_message(admin_msg, ADMIN_CHAT_ID)
-    # 🔔 গ্রুপে নোটিফিকেশন
-    send_group_notification(admin_msg)
 
 # ================== ADMIN MARKETPLACE COMMANDS ==================
 def handle_market_admin(chat_id, text):
@@ -984,7 +966,7 @@ def handle_market_admin(chat_id, text):
         config["group_chat_id"] = group_id
         save_config()
         save_data_to_channel()
-        send_telegram_message(f"✅ ব্যাকআপ গ্রুপ আইডি {group_id} সেট করা হয়েছে। এখন থেকে এক্টিভিটি সেখানে যাবে।", chat_id)
+        send_telegram_message(f"✅ ব্যাকআপ গ্রুপ আইডি {group_id} সেট করা হয়েছে।", chat_id)
         return True
     elif cmd == "/setchannel":
         if len(parts) < 2:
@@ -1115,7 +1097,7 @@ def handle_telegram_commands():
 
                         # Deposit flow active?
                         if chat_id in deposit_sessions:
-                            process_deposit_step(chat_id, text, sender_username)
+                            process_deposit_step(chat_id, text)
                             continue
 
                         # Submission flow
@@ -1130,7 +1112,7 @@ def handle_telegram_commands():
 
                         # Buy session (waiting for quantity)
                         if chat_id in buy_sessions:
-                            handle_buy(chat_id, text, sender_username)
+                            handle_buy(chat_id, text)
                             buy_sessions.discard(chat_id)
                             send_main_keyboard(chat_id)
                             continue
@@ -1140,7 +1122,7 @@ def handle_telegram_commands():
                             start_submission(chat_id, sender_username)
                             continue
                         elif text == "🎁 মাদার একাউন্ট":
-                            handle_getmother(chat_id, sender_username)
+                            handle_getmother(chat_id)
                             continue
                         elif text == "📞 সাপোর্ট":
                             support_sessions.add(chat_id)
@@ -1220,8 +1202,6 @@ def handle_telegram_commands():
                                 save_data_to_channel()
                                 reply = "✨ আমাদের বটে স্বাগতম! ✨"
                                 send_telegram_message(reply, chat_id, reply_markup=get_keyboard(chat_id), parse_mode="Markdown")
-                                # 🔔 গ্রুপে নতুন ইউজার নোটিফিকেশন
-                                send_group_notification(f"🔔 নতুন ইউজার: {sender_username} ({chat_id}) বট শুরু করেছে।")
                                 continue
                             elif text == "/stop":
                                 subscribed_users.discard(chat_id)
@@ -1234,7 +1214,7 @@ def handle_telegram_commands():
                                 handle_addmother(chat_id, args)
                                 continue
                             elif text == "/getmother":
-                                handle_getmother(chat_id, sender_username)
+                                handle_getmother(chat_id)
                                 continue
                             elif text == "/motherlist":
                                 handle_motherlist(chat_id)

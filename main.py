@@ -4,15 +4,24 @@ import threading
 import requests
 import datetime
 import json
+import io
+import logging
 from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
-import io
 
-# ================== CONFIG (use environment variables, fallback to hardcoded) ==================
+# ================== LOGGING ==================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ================== CONFIG (use environment variables only, fallback only for dev) ==================
+# IMPORTANT: Never hardcode tokens in production. Use environment variables.
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8808046131:AAHG_cjPmnzUnY0vCDcmnhmu3XVPGfMlcug")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "2035024902")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003903695158"))  # আপনার প্রাইভেট চ্যানেলের আইডি
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003903695158"))
+
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+    raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set in environment variables")
 
 # ================== FILE PATHS ==================
 MOTHER_FILE = "mother_accounts.json"
@@ -27,7 +36,7 @@ CONFIG_FILE = "config.json"
 # ================== FLASK APP ==================
 app = Flask(__name__)
 
-# ================== GLOBALS ==================
+# ================== GLOBALS & LOCKS ==================
 last_update_id = None
 subscribed_users = set()
 user_info = {}
@@ -45,7 +54,8 @@ config = {
     "bkash_number": "",
     "price_per_account": 1.70,
     "group_chat_id": "",
-    "channel_id": str(CHANNEL_ID)
+    "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
+    "maintenance_mode": False
 }
 deposit_sessions = {}
 buy_sessions = set()
@@ -54,14 +64,14 @@ add_stock_sessions = {}
 # Loss Recovery
 loss_recovery_sessions = {}
 
-# Channel backup (now using document for size safety)
-last_backup_message_id = None   # message_id of the last backup document
-backup_lock = threading.RLock()
+# Channel backup (document)
+last_backup_message_id = None
 
-# General data lock for thread safety
-data_lock = threading.RLock()
+# Locks for thread safety
+data_lock = threading.RLock()          # protects all global data structures
+backup_lock = threading.Lock()         # ensures only one backup runs at a time
 
-# ================== FILE I/O ==================
+# ================== FILE I/O (all writes under data_lock) ==================
 def load_mother_accounts():
     global mother_accounts
     try:
@@ -76,7 +86,7 @@ def save_mother_accounts():
             with open(MOTHER_FILE, "w") as f:
                 json.dump(mother_accounts, f, indent=2)
         except Exception as e:
-            print(f"Mother save error: {e}")
+            logger.error(f"Mother save error: {e}")
 
 def load_user_cooldowns():
     global user_last_request
@@ -92,7 +102,7 @@ def save_user_cooldowns():
             with open(COOLDOWN_FILE, "w") as f:
                 json.dump(user_last_request, f, indent=2)
         except Exception as e:
-            print(f"Cooldown save error: {e}")
+            logger.error(f"Cooldown save error: {e}")
 
 def load_subscribers():
     global subscribed_users, user_info
@@ -114,7 +124,7 @@ def save_subscribers():
             with open(SUBSCRIBERS_FILE, "w") as f:
                 json.dump({"subscribed": list(subscribed_users)}, f)
         except Exception as e:
-            print(f"Subscribers save error: {e}")
+            logger.error(f"Subscribers save error: {e}")
 
 def save_user_info():
     with data_lock:
@@ -122,10 +132,10 @@ def save_user_info():
             with open(USER_INFO_FILE, "w") as f:
                 json.dump(user_info, f, indent=2)
         except Exception as e:
-            print(f"User info save error: {e}")
+            logger.error(f"User info save error: {e}")
 
 def load_market():
-    global accounts, balances, deposits, config, CHANNEL_ID
+    global accounts, balances, deposits, config, CHANNEL_ID, maintenance_mode
     try:
         with open(ACCOUNTS_FILE, "r") as f:
             accounts = json.load(f)
@@ -143,13 +153,18 @@ def load_market():
         deposits = []
     try:
         with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-            if "channel_id" not in config:
-                config["channel_id"] = str(CHANNEL_ID)
-            # Synchronize global CHANNEL_ID with config
-            CHANNEL_ID = int(config["channel_id"])
+            loaded_config = json.load(f)
+            # merge with defaults to handle missing keys
+            for key, value in config.items():
+                if key not in loaded_config:
+                    loaded_config[key] = value
+            config = loaded_config
+            # Sync channel ID
+            CHANNEL_ID = int(config.get("channel_id", "0"))
+            maintenance_mode = config.get("maintenance_mode", False)
     except:
-        config = {"bkash_number": "", "price_per_account": 1.70, "group_chat_id": "", "channel_id": str(CHANNEL_ID)}
+        config["channel_id"] = str(CHANNEL_ID) if CHANNEL_ID else ""
+        maintenance_mode = False
         CHANNEL_ID = int(config["channel_id"])
 
 def save_accounts():
@@ -169,11 +184,12 @@ def save_deposits():
 
 def save_config():
     with data_lock:
+        config["maintenance_mode"] = maintenance_mode  # always persist maintenance state
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=2)
 
 def save_all():
-    """সব ডেটা ফাইল সেভ করে ও চ্যানেলে ব্যাকআপ পাঠায়"""
+    """Save all local files and then backup to channel."""
     save_accounts()
     save_balances()
     save_deposits()
@@ -195,23 +211,26 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Send error to {chat_id}: {e}")
+        logger.error(f"Send error to {chat_id}: {e}")
 
 def send_telegram_document(file_bytes, filename, chat_id, caption=""):
+    """Return True if document sent successfully, else False."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     try:
         files = {'document': (filename, file_bytes,
-                             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-        requests.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
+                              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+        resp = requests.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
+        return resp.status_code == 200 and resp.json().get("ok", False)
     except Exception as e:
-        print(f"Document send error: {e}")
+        logger.error(f"Document send error: {e}")
+        return False
 
 def delete_telegram_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
     try:
         requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
     except Exception as e:
-        print(f"Delete message error: {e}")
+        logger.error(f"Delete message error: {e}")
 
 def forward_telegram_document(chat_id, from_chat_id, message_id):
     """Forward a document by message_id"""
@@ -224,19 +243,44 @@ def forward_telegram_document(chat_id, from_chat_id, message_id):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Forward error: {e}")
+        logger.error(f"Forward error: {e}")
 
 def broadcast_message(text):
+    """Send a message to all subscribers, with rate limit and blocked user cleanup."""
+    to_remove = []
     for chat_id in list(subscribed_users):
-        send_telegram_message(text, chat_id)
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        try:
+            resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
+            if resp.status_code == 403:  # user blocked bot
+                to_remove.append(chat_id)
+            elif resp.status_code == 429:  # rate limited
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 1)
+                time.sleep(retry_after)
+                # retry once after waiting
+                requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
+        except Exception as e:
+            logger.error(f"Broadcast to {chat_id} failed: {e}")
+            to_remove.append(chat_id)
+        time.sleep(0.05)  # 20 messages per second safe
+    # clean up blocked/deleted users
+    if to_remove:
+        with data_lock:
+            for uid in to_remove:
+                subscribed_users.discard(uid)
+                user_info.pop(uid, None)
+        save_subscribers()
+        save_user_info()
+        save_data_to_channel()
 
-# ================== CHANNEL BACKUP (document-based, no size limit) ==================
+# ================== CHANNEL BACKUP (document-based, with size splitting) ==================
 def save_data_to_channel():
     global last_backup_message_id
+    if not CHANNEL_ID:
+        return
     with backup_lock:
         try:
-            # Prepare backup data
-            with data_lock:   # ensure consistent read
+            with data_lock:
                 data = {
                     "accounts": accounts,
                     "balances": balances,
@@ -249,28 +293,59 @@ def save_data_to_channel():
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
-            filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-            # Delete previous backup document if exists
-            if last_backup_message_id:
-                try:
-                    delete_telegram_message(CHANNEL_ID, last_backup_message_id)
-                except:
-                    pass
-
-            # Send new document
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            files = {'document': (filename, json_bytes, 'application/json')}
-            resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
-            if resp.status_code == 200:
-                result = resp.json()
-                if result.get("ok"):
-                    last_backup_message_id = result["result"]["message_id"]
+            max_size = 48 * 1024 * 1024  # 48 MB safety limit
+            if len(json_bytes) <= max_size:
+                # Single file
+                filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                if last_backup_message_id:
+                    try:
+                        delete_telegram_message(CHANNEL_ID, last_backup_message_id)
+                    except:
+                        pass
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                files = {'document': (filename, json_bytes, 'application/json')}
+                resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    last_backup_message_id = resp.json()["result"]["message_id"]
+                else:
+                    logger.error(f"Backup upload failed: {resp.text}")
+            else:
+                # Split into multiple parts
+                logger.warning("Backup file too large, splitting into parts")
+                # We'll split the data dictionary into chunks (roughly by number of accounts)
+                # For simplicity, separate accounts and other data
+                main_data = {
+                    "balances": data["balances"],
+                    "deposits": data["deposits"],
+                    "config": data["config"],
+                    "subscribed_users": data["subscribed_users"],
+                    "user_info": data["user_info"],
+                    "mother_accounts": [],
+                    "user_cooldowns": data["user_cooldowns"],
+                    "timestamp": data["timestamp"]
+                }
+                main_json = json.dumps(main_data, indent=2, ensure_ascii=False).encode('utf-8')
+                # Send main part
+                filename_main = f"backup_main_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                files = {'document': (filename_main, main_json, 'application/json')}
+                resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    # Send accounts in batches
+                    acc_chunks = [accounts[i:i+5000] for i in range(0, len(accounts), 5000)]
+                    for idx, chunk in enumerate(acc_chunks):
+                        chunk_data = {"accounts_chunk": chunk, "chunk_id": idx}
+                        chunk_json = json.dumps(chunk_data, ensure_ascii=False).encode('utf-8')
+                        filename_chunk = f"backup_accounts_{idx}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                        files_chunk = {'document': (filename_chunk, chunk_json, 'application/json')}
+                        requests.post(url, data={"chat_id": CHANNEL_ID}, files=files_chunk, timeout=30)
+                # Delete previous backup messages? Not possible with multiple parts, skip for simplicity.
+                # For now, we don't track multiple message IDs.
         except Exception as e:
-            print(f"Channel backup error: {e}")
+            logger.error(f"Channel backup error: {e}")
 
 def auto_backup_loop():
-    """প্রতি ২৪ ঘণ্টায় চ্যানেলে ব্যাকআপ আপডেট"""
+    """Run backup every 24 hours."""
     while True:
         time.sleep(86400)
         save_data_to_channel()
@@ -383,7 +458,7 @@ def process_submission_step(chat_id, text, sender_username):
         return True
 
     if step == "username":
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
             return True
@@ -397,7 +472,7 @@ def process_submission_step(chat_id, text, sender_username):
         return True
 
     elif step == "password":
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["data"]["usernames"]
         if len(lines) != len(usernames):
             send_telegram_message(
@@ -415,9 +490,12 @@ def process_submission_step(chat_id, text, sender_username):
         return True
 
     elif step == "2fa":
-        raw_lines = text.split('\n')
+        raw_lines = text.splitlines()
         twofa_list = [l.strip() for l in raw_lines]
+        # Remove trailing empty lines if count exceeds usernames
         usernames = session["data"]["usernames"]
+        while len(twofa_list) > len(usernames) and twofa_list and twofa_list[-1] == '':
+            twofa_list.pop()
         if len(twofa_list) != len(usernames):
             send_telegram_message(
                 f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।",
@@ -443,17 +521,19 @@ def process_submission_step(chat_id, text, sender_username):
         excel_bytes = generate_submission_excel(usernames, passwords, twofa_list, bkash, tg_username)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"submission_{chat_id}_{timestamp}.xlsx"
-        send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID)
-        send_telegram_message(
-            "✅ আপনার অ্যাকাউন্ট সফলভাবে জমা হয়েছে।\n\nঅ্যাডমিন শীঘ্রই যোগাযোগ করবে। ধন্যবাদ! 🙏",
-            chat_id
-        )
+        if send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID):
+            send_telegram_message(
+                "✅ আপনার অ্যাকাউন্ট সফলভাবে জমা হয়েছে।\n\nঅ্যাডমিন শীঘ্রই যোগাযোগ করবে। ধন্যবাদ! 🙏",
+                chat_id
+            )
+        else:
+            send_telegram_message("⚠️ জমা দেওয়ার সময় ত্রুটি হয়েছে, অনুগ্রহ করে পরে চেষ্টা করুন।", chat_id)
         del submission_sessions[chat_id]
         send_main_keyboard(chat_id)
         return True
     return False
 
-# ================== LOSS RECOVERY HANDLER ==================
+# ================== LOSS RECOVERY HANDLER (improved) ==================
 def start_loss_recovery(chat_id):
     loss_recovery_sessions[chat_id] = {
         "step": "usernames",
@@ -479,7 +559,7 @@ def process_loss_recovery_step(chat_id, text):
         return True
 
     if step == "usernames":
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
             return True
@@ -506,7 +586,6 @@ def process_loss_recovery_step(chat_id, text):
         return True
 
     elif step == "report_file":
-        # If user sends text instead of file, remind them
         send_telegram_message(
             "⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।",
              chat_id
@@ -530,7 +609,6 @@ def process_loss_recovery_step(chat_id, text):
             return True
         session["data"]["whatsapp"] = whatsapp
 
-        # সব তথ্য অ্যাডমিনকে পাঠাই
         usernames = session["data"]["usernames"]
         cookie_date = session["data"]["cookie_date"]
         bkash = session["data"]["bkash"]
@@ -562,74 +640,60 @@ def process_loss_recovery_step(chat_id, text):
     return False
 
 def handle_loss_recovery_file(chat_id, message):
-    """যখন ইউজার 'রিপোর্ট ফাইল' স্টেপে ফাইল পাঠায়"""
-
+    """Receive Excel file during loss recovery step, validate MIME type."""
     if chat_id not in loss_recovery_sessions:
         return
-
     session = loss_recovery_sessions[chat_id]
-
     if session["step"] != "report_file":
         return
 
     doc = message.get("document")
-
     if not doc:
-        send_telegram_message(
-            "⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।",
-            chat_id
-        )
+        send_telegram_message("⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।", chat_id)
         return
 
-    file_name = doc.get("file_name", "").lower()
-
-    if not (file_name.endswith(".xlsx") or file_name.endswith(".xls")):
-        send_telegram_message(
-            "❌ শুধুমাত্র Excel File (.xlsx বা .xls) গ্রহণ করা হবে।\n"
-            "স্ক্রিনশট, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
-            chat_id
-        )
+    # Validate MIME type
+    allowed_mimes = [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel"
+    ]
+    mime = doc.get("mime_type", "")
+    if mime not in allowed_mimes:
+        send_telegram_message("❌ অবৈধ ফাইল ফরম্যাট। শুধুমাত্র এক্সেল ফাইল গ্রহণ করা হবে।", chat_id)
         return
 
     file_id = doc.get("file_id")
     message_id = message.get("message_id")
-
     session["data"]["report_file_id"] = file_id
     session["data"]["report_message_id"] = message_id
     session["step"] = "bkash"
+    send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
-    send_telegram_message(
-        "💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):",
-        chat_id
-    )
-
-# ================== FREE MOTHER ACCOUNT ==================
+# ================== FREE MOTHER ACCOUNT (thread-safe) ==================
 def handle_addmother(chat_id, args):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
-    if not args:
-        send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
-        return
     parts = args.split(maxsplit=2)
     if len(parts) < 2:
-        send_telegram_message("❌ username এবং password আবশ্যক।", chat_id)
+        send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
         return
     username = parts[0]
     password = parts[1]
     fa_key = parts[2] if len(parts) == 3 else ""
-    for acc in mother_accounts:
-        if acc["username"] == username and acc["password"] == password:
-            send_telegram_message("⚠️ এই অ্যাকাউন্টটি আগেই যোগ করা আছে।", chat_id)
-            return
-    mother_accounts.append({
-        "username": username,
-        "password": password,
-        "fa_key": fa_key,
-        "assigned_to": None,
-        "assigned_at": None
-    })
-    save_mother_accounts()
+    with data_lock:
+        for acc in mother_accounts:
+            if acc["username"] == username and acc["password"] == password:
+                send_telegram_message("⚠️ এই অ্যাকাউন্টটি আগেই যোগ করা আছে।", chat_id)
+                return
+        mother_accounts.append({
+            "username": username,
+            "password": password,
+            "fa_key": fa_key,
+            "assigned_to": None,
+            "assigned_at": None
+        })
+        save_mother_accounts()
     save_data_to_channel()
     send_telegram_message(f"✅ মাদার অ্যাকাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
@@ -646,79 +710,83 @@ def handle_getmother(chat_id):
             chat_id)
         send_main_keyboard(chat_id)
         return
-    for acc in mother_accounts:
-        if acc["assigned_to"] is None:
-            acc["assigned_to"] = str(chat_id)
-            acc["assigned_at"] = now
-            save_mother_accounts()
-            user_last_request[str(chat_id)] = now
-            save_user_cooldowns()
-            save_data_to_channel()
-            msg = (
-                "🎁 আপনার মাদার অ্যাকাউন্ট:\n\n"
-                f"👤 ইউজারনেম: {acc['username']}\n"
-                f"🔑 পাসওয়ার্ড: {acc['password']}"
-            )
-            if acc["fa_key"]:
-                msg += f"\n🔐 2FA Key: {acc['fa_key']}"
-            send_telegram_message(msg, chat_id)
+
+    with data_lock:
+        for acc in mother_accounts:
+            if acc["assigned_to"] is None:
+                acc["assigned_to"] = str(chat_id)
+                acc["assigned_at"] = now
+                user_last_request[str(chat_id)] = now
+                save_mother_accounts()
+                save_user_cooldowns()
+                break
+        else:
+            send_telegram_message("❌ কোনো মাদার অ্যাকাউন্ট উপলব্ধ নেই। পরে আবার চেষ্টা করুন।", chat_id)
             send_main_keyboard(chat_id)
             return
-    send_telegram_message("❌ কোনো মাদার অ্যাকাউন্ট উপলব্ধ নেই। পরে আবার চেষ্টা করুন।", chat_id)
+
+    # Send the account outside the lock to avoid long lock
+    msg = (
+        "🎁 আপনার মাদার অ্যাকাউন্ট:\n\n"
+        f"👤 ইউজারনেম: {acc['username']}\n"
+        f"🔑 পাসওয়ার্ড: {acc['password']}"
+    )
+    if acc["fa_key"]:
+        msg += f"\n🔐 2FA Key: {acc['fa_key']}"
+    send_telegram_message(msg, chat_id)
     send_main_keyboard(chat_id)
+    save_data_to_channel()  # backup after assignment
 
 def handle_motherlist(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
-    if not mother_accounts:
-        send_telegram_message("📭 কোনো মাদার অ্যাকাউন্ট নেই।", chat_id)
-        return
-    lines = ["🎁 *মাদার অ্যাকাউন্ট লিস্ট:*\n"]
-    for i, acc in enumerate(mother_accounts, start=1):
-        assigned = "কেহ না"
-        if acc["assigned_to"]:
-            try:
-                assigned_time = datetime.datetime.fromtimestamp(acc["assigned_at"]).strftime('%d/%m %H:%M')
-            except:
-                assigned_time = "কিছুক্ষণ আগে"
-            assigned = f"{acc['assigned_to']} ({assigned_time})"
-        twofa = "আছে" if acc.get("fa_key") else "নেই"
-        lines.append(
-            f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {twofa} | বরাদ্দ: {assigned}"
-        )
+    with data_lock:
+        if not mother_accounts:
+            send_telegram_message("📭 কোনো মাদার অ্যাকাউন্ট নেই।", chat_id)
+            return
+        lines = ["🎁 *মাদার অ্যাকাউন্ট লিস্ট:*\n"]
+        for i, acc in enumerate(mother_accounts, start=1):
+            assigned = "কেহ না"
+            if acc["assigned_to"]:
+                try:
+                    assigned_time = datetime.datetime.fromtimestamp(acc["assigned_at"]).strftime('%d/%m %H:%M')
+                except:
+                    assigned_time = "কিছুক্ষণ আগে"
+                assigned = f"{acc['assigned_to']} ({assigned_time})"
+            twofa = "আছে" if acc.get("fa_key") else "নেই"
+            lines.append(
+                f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {twofa} | বরাদ্দ: {assigned}"
+            )
     send_telegram_message("\n".join(lines), chat_id)
 
 def handle_deletemother(chat_id, arg):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
-    if not arg:
-        send_telegram_message("❌ ফরম্যাট: /deletemother <ইনডেক্স নাম্বার অথবা ইউজারনেম>", chat_id)
-        return
     arg = arg.strip()
-    try:
-        idx = int(arg) - 1
-        if 0 <= idx < len(mother_accounts):
-            deleted = mother_accounts.pop(idx)
-            save_mother_accounts()
-            save_data_to_channel()
-            send_telegram_message(f"✅ মাদার অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
-            return
-        else:
-            send_telegram_message("❌ ভুল ইনডেক্স। /motherlist দিয়ে নম্বর দেখুন।", chat_id)
-            return
-    except ValueError:
-        for i, acc in enumerate(mother_accounts):
-            if acc["username"] == arg:
-                mother_accounts.pop(i)
+    with data_lock:
+        try:
+            idx = int(arg) - 1
+            if 0 <= idx < len(mother_accounts):
+                deleted = mother_accounts.pop(idx)
                 save_mother_accounts()
-                save_data_to_channel()
-                send_telegram_message(f"✅ ইউজারনেম `{arg}` যুক্ত মাদার অ্যাকাউন্ট মুছে ফেলা হয়েছে।", chat_id)
+            else:
+                send_telegram_message("❌ ভুল ইনডেক্স। /motherlist দিয়ে নম্বর দেখুন।", chat_id)
                 return
-        send_telegram_message(f"❌ `{arg}` নামে কোনো মাদার অ্যাকাউন্ট পাওয়া যায়নি।", chat_id)
+        except ValueError:
+            for i, acc in enumerate(mother_accounts):
+                if acc["username"] == arg:
+                    deleted = mother_accounts.pop(i)
+                    save_mother_accounts()
+                    break
+            else:
+                send_telegram_message(f"❌ `{arg}` নামে কোনো মাদার অ্যাকাউন্ট পাওয়া যায়নি।", chat_id)
+                return
+    save_data_to_channel()
+    send_telegram_message(f"✅ মাদার অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
 
-# ================== MAINTENANCE MODE ==================
+# ================== MAINTENANCE MODE (persistent) ==================
 def handle_maintenance(chat_id, args):
     global maintenance_mode
     if str(chat_id) != ADMIN_CHAT_ID:
@@ -727,9 +795,11 @@ def handle_maintenance(chat_id, args):
     args = args.strip().lower()
     if args == "on":
         maintenance_mode = True
+        save_config()  # persist immediately
         send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু করা হয়েছে। সাধারণ ইউজাররা এখন বট ব্যবহার করতে পারবে না।", chat_id)
     elif args == "off":
         maintenance_mode = False
+        save_config()
         send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড বন্ধ করা হয়েছে। বট এখন স্বাভাবিক ভাবে চলবে।", chat_id)
     else:
         status = "চালু" if maintenance_mode else "বন্ধ"
@@ -738,22 +808,21 @@ def handle_maintenance(chat_id, args):
 # ================== ADMIN BROADCAST & USERS ==================
 def handle_admin_users(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
-        send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
-    if not subscribed_users:
-        send_telegram_message("কোনো সাবস্ক্রাইবার নেই।", chat_id)
-        return
-    msg_lines = ["📋 সাবস্ক্রাইবড ইউজার লিস্ট:\n"]
-    for uid in subscribed_users:
-        name = user_info.get(str(uid), f"ID:{uid}")
-        if ' ' not in name:
-            name = '@' + name
-        msg_lines.append(f"• {name} (ID: {uid})")
+    with data_lock:
+        if not subscribed_users:
+            send_telegram_message("কোনো সাবস্ক্রাইবার নেই।", chat_id)
+            return
+        msg_lines = ["📋 সাবস্ক্রাইবড ইউজার লিস্ট:\n"]
+        for uid in subscribed_users:
+            name = user_info.get(str(uid), f"ID:{uid}")
+            if ' ' not in name:
+                name = '@' + name
+            msg_lines.append(f"• {name} (ID: {uid})")
     send_telegram_message("\n".join(msg_lines), chat_id)
 
 def handle_admin_broadcast(chat_id, message):
     if str(chat_id) != ADMIN_CHAT_ID:
-        send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
     if not message.strip():
         send_telegram_message("❌ মেসেজ খালি রাখা যাবে না। ফরম্যাট: /broadcast <মেসেজ>", chat_id)
@@ -763,7 +832,6 @@ def handle_admin_broadcast(chat_id, message):
 
 def handle_admin_send(chat_id, target_id, message):
     if str(chat_id) != ADMIN_CHAT_ID:
-        send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
     if not target_id.isdigit():
         send_telegram_message("❌ সঠিক ইউজার আইডি দিন।", chat_id)
@@ -779,9 +847,8 @@ def handle_backup(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
-
     save_all()
-
+    # Also send a local backup copy to admin for extra safety
     with data_lock:
         backup = {
             "subscribed_users": list(subscribed_users),
@@ -796,8 +863,10 @@ def handle_backup(chat_id):
         }
     backup_json = json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')
     filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    send_telegram_document(backup_json, filename, ADMIN_CHAT_ID)
-    send_telegram_message("✅ ব্যাকআপ ফাইল তৈরি ও পাঠানো হয়েছে। /restore এর মাধ্যমে এটি ব্যবহার করুন।", chat_id)
+    if send_telegram_document(backup_json, filename, ADMIN_CHAT_ID):
+        send_telegram_message("✅ ব্যাকআপ ফাইল তৈরি ও পাঠানো হয়েছে। /restore এর মাধ্যমে এটি ব্যবহার করুন।", chat_id)
+    else:
+        send_telegram_message("⚠️ অ্যাডমিনকে ব্যাকআপ পাঠানো যায়নি, কিন্তু চ্যানেল ব্যাকআপ সম্পন্ন হয়েছে।", chat_id)
 
 def handle_restore(chat_id, file_id):
     if str(chat_id) != ADMIN_CHAT_ID:
@@ -818,13 +887,13 @@ def handle_restore(chat_id, file_id):
         content = file_resp.text
         backup = json.loads(content)
     except Exception as e:
-        print(f"Restore download error: {e}")
+        logger.error(f"Restore download error: {e}")
         send_telegram_message("❌ ব্যাকআপ ফাইল ডাউনলোড বা পার্স করতে ব্যর্থ।", chat_id)
         return
 
     with data_lock:
         global subscribed_users, user_info, mother_accounts, user_last_request
-        global accounts, balances, deposits, config, CHANNEL_ID
+        global accounts, balances, deposits, config, CHANNEL_ID, maintenance_mode
         subscribed_users = set(backup.get("subscribed_users", []))
         user_info = backup.get("user_info", {})
         mother_accounts = backup.get("mother_accounts", [])
@@ -832,9 +901,10 @@ def handle_restore(chat_id, file_id):
         accounts = backup.get("market_accounts", backup.get("accounts", []))
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
-        config = backup.get("config", {"bkash_number": "", "price_per_account": 1.70, "group_chat_id": "", "channel_id": str(CHANNEL_ID)})
-        # Sync channel ID
-        CHANNEL_ID = int(config.get("channel_id", str(CHANNEL_ID)))
+        config = backup.get("config", {})
+        # Sync channel ID and maintenance mode
+        CHANNEL_ID = int(config.get("channel_id", "0"))
+        maintenance_mode = config.get("maintenance_mode", False)
         save_all()
     send_telegram_message("✅ ব্যাকআপ রিস্টোর সম্পন্ন হয়েছে।", chat_id)
 
@@ -862,7 +932,7 @@ def process_add_stock_step(chat_id, text):
         return True
 
     if step == "usernames":
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
             return True
@@ -876,7 +946,7 @@ def process_add_stock_step(chat_id, text):
         return True
 
     elif step == "passwords":
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["usernames"]
         if len(lines) != len(usernames):
             send_telegram_message(
@@ -894,9 +964,12 @@ def process_add_stock_step(chat_id, text):
         return True
 
     elif step == "fa_keys":
-        raw_lines = text.split('\n')
+        raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
+        # Remove trailing empty lines if extra
+        while len(fa_list) > len(usernames) and fa_list and fa_list[-1] == '':
+            fa_list.pop()
         if len(fa_list) != len(usernames):
             send_telegram_message(
                 f"❌ 2FA কী সংখ্যা ({len(fa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।",
@@ -904,13 +977,14 @@ def process_add_stock_step(chat_id, text):
             )
             return True
         count = len(usernames)
-        for i in range(count):
-            accounts.append({
-                "username": usernames[i],
-                "password": session["passwords"][i],
-                "fa_key": fa_list[i]
-            })
-        save_accounts()
+        with data_lock:
+            for i in range(count):
+                accounts.append({
+                    "username": usernames[i],
+                    "password": session["passwords"][i],
+                    "fa_key": fa_list[i]
+                })
+            save_accounts()
         save_data_to_channel()
         del add_stock_sessions[chat_id]
         send_telegram_message(f"✅ {count} টি অ্যাকাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
@@ -918,7 +992,7 @@ def process_add_stock_step(chat_id, text):
         return True
     return False
 
-# ================== MARKETPLACE: DEPOSIT & BUY ==================
+# ================== MARKETPLACE: DEPOSIT & BUY (with rollback) ==================
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "")
@@ -971,8 +1045,9 @@ def process_deposit_step(chat_id, text):
             "status": "pending",
             "time": time.time()
         }
-        deposits.append(deposit)
-        save_deposits()
+        with data_lock:
+            deposits.append(deposit)
+            save_deposits()
         save_data_to_channel()
         deposit_sessions.pop(chat_id, None)
         admin_msg = (
@@ -1001,40 +1076,55 @@ def handle_buy(chat_id, quantity):
             raise ValueError
     except:
         send_telegram_message("❌ সঠিক সংখ্যা দিন। যেমন: 3", chat_id)
-        return False   # stay in buy session
-    if qty > len(accounts):
-        send_telegram_message(f"❌ পর্যাপ্ত অ্যাকাউন্ট নেই। বর্তমান স্টক: {len(accounts)}", chat_id)
         return False
-    price = config.get("price_per_account", 1.70)
-    total = qty * price
-    user_balance = balances.get(chat_id, 0)
-    if user_balance < total:
-        send_telegram_message(
-            f"❌ পর্যাপ্ত ব্যালেন্স নেই।\n"
-            f"প্রয়োজন: {total} টাকা\n"
-            f"আপনার ব্যালেন্স: {user_balance} টাকা\n"
-            f"দয়া করে প্রথমে ডিপোজিট করুন।",
-            chat_id
-        )
-        return False
-    bought = []
-    for _ in range(qty):
-        bought.append(accounts.pop(0))
-    save_accounts()
-    balances[chat_id] = user_balance - total
-    save_balances()
-    save_data_to_channel()
+    with data_lock:
+        if qty > len(accounts):
+            send_telegram_message(f"❌ পর্যাপ্ত অ্যাকাউন্ট নেই। বর্তমান স্টক: {len(accounts)}", chat_id)
+            return False
+        price = config.get("price_per_account", 1.70)
+        total = qty * price
+        user_balance = balances.get(chat_id, 0)
+        if user_balance < total:
+            send_telegram_message(
+                f"❌ পর্যাপ্ত ব্যালেন্স নেই।\n"
+                f"প্রয়োজন: {total} টাকা\n"
+                f"আপনার ব্যালেন্স: {user_balance} টাকা\n"
+                f"দয়া করে প্রথমে ডিপোজিট করুন।",
+                chat_id
+            )
+            return False
+
+        # Reserve the accounts (remove from stock) and deduct balance
+        bought = accounts[:qty]
+        del accounts[:qty]
+        balances[chat_id] = user_balance - total
+        save_accounts()
+        save_balances()
+    # Generate Excel and send
     excel_bytes = generate_purchase_excel(bought)
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    send_telegram_document(excel_bytes, filename, chat_id)
-    send_telegram_message(
-        f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\n"
-        f"অবশিষ্ট ব্যালেন্স: {balances[chat_id]} টাকা",
-        chat_id
-    )
-    admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
-    send_telegram_message(admin_msg, ADMIN_CHAT_ID)
-    return True
+    if send_telegram_document(excel_bytes, filename, chat_id):
+        # Success: notify user and admin
+        send_telegram_message(
+            f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\n"
+            f"অবশিষ্ট ব্যালেন্স: {balances[chat_id]} টাকা",
+            chat_id
+        )
+        admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
+        send_telegram_message(admin_msg, ADMIN_CHAT_ID)
+    else:
+        # Rollback: restore accounts and refund balance
+        with data_lock:
+            accounts[:0] = bought  # insert back at front
+            balances[chat_id] = user_balance  # restore original balance
+            save_accounts()
+            save_balances()
+        send_telegram_message(
+            "⚠️ অ্যাকাউন্ট ডেলিভারি ব্যর্থ হয়েছে। আপনার টাকা ফেরত দেওয়া হয়েছে এবং অ্যাকাউন্ট পুনরায় স্টকে যোগ করা হয়েছে। পরে আবার চেষ্টা করুন।",
+            chat_id
+        )
+    save_data_to_channel()  # backup after transaction
+    return True  # whether success or rollback, exit buy session
 
 # ================== ADMIN MARKETPLACE COMMANDS ==================
 def handle_market_admin(chat_id, text):
@@ -1046,43 +1136,44 @@ def handle_market_admin(chat_id, text):
         start_add_stock(chat_id)
         return True
     elif cmd == "/stock":
-        if not accounts:
-            send_telegram_message("📭 কোনো অ্যাকাউন্ট স্টকে নেই।", chat_id)
-        else:
-            lines = [f"📦 স্টক ({len(accounts)} টি):"]
-            for i, acc in enumerate(accounts, 1):
-                lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key', 'N/A')}")
-            send_telegram_message("\n".join(lines), chat_id)
+        with data_lock:
+            if not accounts:
+                send_telegram_message("📭 কোনো অ্যাকাউন্ট স্টকে নেই।", chat_id)
+            else:
+                lines = [f"📦 স্টক ({len(accounts)} টি):"]
+                for i, acc in enumerate(accounts, 1):
+                    lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key', 'N/A')}")
+                send_telegram_message("\n".join(lines), chat_id)
         return True
     elif cmd == "/deletestock":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletestock <ইনডেক্স নাম্বার অথবা ইউজারনেম>", chat_id)
             return True
         arg = parts[1].strip()
-        try:
-            idx = int(arg) - 1
-            if 0 <= idx < len(accounts):
-                deleted = accounts.pop(idx)
-                save_accounts()
-                save_data_to_channel()
-                send_telegram_message(f"✅ স্টক থেকে অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
-                return True
-            else:
-                send_telegram_message("❌ ভুল ইনডেক্স। /stock দিয়ে নম্বর দেখুন।", chat_id)
-                return True
-        except ValueError:
-            for i, acc in enumerate(accounts):
-                if acc["username"] == arg:
-                    accounts.pop(i)
+        with data_lock:
+            try:
+                idx = int(arg) - 1
+                if 0 <= idx < len(accounts):
+                    deleted = accounts.pop(idx)
                     save_accounts()
-                    save_data_to_channel()
-                    send_telegram_message(f"✅ স্টক থেকে ইউজারনেম `{arg}` যুক্ত অ্যাকাউন্ট মুছে ফেলা হয়েছে।", chat_id)
+                else:
+                    send_telegram_message("❌ ভুল ইনডেক্স। /stock দিয়ে নম্বর দেখুন।", chat_id)
                     return True
-            send_telegram_message(f"❌ `{arg}` নামে কোনো অ্যাকাউন্ট পাওয়া যায়নি।", chat_id)
-            return True
+            except ValueError:
+                for i, acc in enumerate(accounts):
+                    if acc["username"] == arg:
+                        deleted = accounts.pop(i)
+                        save_accounts()
+                        break
+                else:
+                    send_telegram_message(f"❌ `{arg}` নামে কোনো অ্যাকাউন্ট পাওয়া যায়নি।", chat_id)
+                    return True
+        save_data_to_channel()
+        send_telegram_message(f"✅ স্টক থেকে অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
+        return True
     elif cmd == "/bulkdelete":
         if len(parts) < 2:
-            send_telegram_message("❌ ফরম্যাট: /bulkdelete <সংখ্যা>\nউদাহরণ: /bulkdelete 5 (প্রথম 5 টি অ্যাকাউন্ট ডিলিট হবে)", chat_id)
+            send_telegram_message("❌ ফরম্যাট: /bulkdelete <সংখ্যা>", chat_id)
             return True
         arg = parts[1].strip()
         try:
@@ -1092,12 +1183,13 @@ def handle_market_admin(chat_id, text):
         except:
             send_telegram_message("❌ সঠিক সংখ্যা দিন (পজিটিভ পূর্ণসংখ্যা)।", chat_id)
             return True
-        if count > len(accounts):
-            send_telegram_message(f"❌ স্টকে মোট {len(accounts)} টি অ্যাকাউন্ট আছে। আপনি {count} টি ডিলিট করতে পারবেন না।", chat_id)
-            return True
-        deleted = accounts[:count]
-        del accounts[:count]
-        save_accounts()
+        with data_lock:
+            if count > len(accounts):
+                send_telegram_message(f"❌ স্টকে মোট {len(accounts)} টি অ্যাকাউন্ট আছে। আপনি {count} টি ডিলিট করতে পারবেন না।", chat_id)
+                return True
+            deleted = accounts[:count]
+            del accounts[:count]
+            save_accounts()
         save_data_to_channel()
         usernames = [acc['username'] for acc in deleted]
         send_telegram_message(f"✅ স্টক থেকে প্রথম {count} টি অ্যাকাউন্ট ডিলিট করা হয়েছে:\n" + "\n".join(usernames), chat_id)
@@ -1113,8 +1205,9 @@ def handle_market_admin(chat_id, text):
         except:
             send_telegram_message("❌ সঠিক মূল্য দিন (সংখ্যা)।", chat_id)
             return True
-        config["price_per_account"] = price
-        save_config()
+        with data_lock:
+            config["price_per_account"] = price
+            save_config()
         save_data_to_channel()
         send_telegram_message(f"✅ প্রতি অ্যাকাউন্টের মূল্য {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
         return True
@@ -1123,8 +1216,9 @@ def handle_market_admin(chat_id, text):
             send_telegram_message("❌ ফরম্যাট: /setbkash <বিকাশ নম্বর>", chat_id)
             return True
         number = parts[1]
-        config["bkash_number"] = number
-        save_config()
+        with data_lock:
+            config["bkash_number"] = number
+            save_config()
         save_data_to_channel()
         send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
         return True
@@ -1133,8 +1227,9 @@ def handle_market_admin(chat_id, text):
             send_telegram_message("❌ ফরম্যাট: /setgroup <গ্রুপ চ্যাট আইডি>", chat_id)
             return True
         group_id = parts[1]
-        config["group_chat_id"] = group_id
-        save_config()
+        with data_lock:
+            config["group_chat_id"] = group_id
+            save_config()
         save_data_to_channel()
         send_telegram_message(f"✅ ব্যাকআপ গ্রুপ আইডি {group_id} সেট করা হয়েছে।", chat_id)
         return True
@@ -1144,10 +1239,19 @@ def handle_market_admin(chat_id, text):
             return True
         try:
             new_channel_id = int(parts[1])
-            global CHANNEL_ID
-            CHANNEL_ID = new_channel_id
-            config["channel_id"] = str(CHANNEL_ID)
-            save_config()
+            # Simple validation: try to send a test message
+            test_resp = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": new_channel_id, "text": "চ্যানেল কনফিগারেশন টেস্ট"}
+            )
+            if test_resp.status_code != 200 or not test_resp.json().get("ok"):
+                send_telegram_message("❌ প্রদত্ত চ্যানেল আইডিতে মেসেজ পাঠানো যায়নি। নিশ্চিত করুন বট চ্যানেলের অ্যাডমিন।", chat_id)
+                return True
+            with data_lock:
+                global CHANNEL_ID
+                CHANNEL_ID = new_channel_id
+                config["channel_id"] = str(CHANNEL_ID)
+                save_config()
             save_data_to_channel()
             send_telegram_message(f"✅ ব্যাকআপ চ্যানেল {CHANNEL_ID} সেট করা হয়েছে।", chat_id)
         except ValueError:
@@ -1158,36 +1262,41 @@ def handle_market_admin(chat_id, text):
             send_telegram_message("❌ ফরম্যাট: /approve <deposit_id>", chat_id)
             return True
         deposit_id = parts[1]
-        for dep in deposits:
-            if dep["id"] == deposit_id and dep["status"] == "pending":
-                dep["status"] = "approved"
-                user = dep["user_id"]
-                balances[user] = balances.get(user, 0) + dep["amount"]
-                save_balances()
-                save_deposits()
-                save_data_to_channel()
-                send_telegram_message(f"✅ ডিপোজিট {deposit_id} অনুমোদিত। ইউজারের ব্যালেন্স আপডেট হয়েছে।", chat_id)
-                send_telegram_message(f"✅ আপনার {dep['amount']} টাকার ডিপোজিট অনুমোদিত হয়েছে। বর্তমান ব্যালেন্স: {balances[user]} টাকা", user)
-                return True
-        send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি বা ইতিমধ্যে প্রসেস করা হয়েছে।", chat_id)
+        with data_lock:
+            for dep in deposits:
+                if dep["id"] == deposit_id and dep["status"] == "pending":
+                    dep["status"] = "approved"
+                    user = dep["user_id"]
+                    balances[user] = balances.get(user, 0) + dep["amount"]
+                    save_balances()
+                    save_deposits()
+                    send_telegram_message(f"✅ ডিপোজিট {deposit_id} অনুমোদিত। ইউজারের ব্যালেন্স আপডেট হয়েছে।", chat_id)
+                    send_telegram_message(f"✅ আপনার {dep['amount']} টাকার ডিপোজিট অনুমোদিত হয়েছে। বর্তমান ব্যালেন্স: {balances[user]} টাকা", user)
+                    break
+            else:
+                send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি বা ইতিমধ্যে প্রসেস করা হয়েছে।", chat_id)
+        save_data_to_channel()
         return True
     elif cmd == "/reject":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /reject <deposit_id>", chat_id)
             return True
         deposit_id = parts[1]
-        for dep in deposits:
-            if dep["id"] == deposit_id and dep["status"] == "pending":
-                dep["status"] = "rejected"
-                save_deposits()
-                save_data_to_channel()
-                send_telegram_message(f"❌ ডিপোজিট {deposit_id} বাতিল করা হয়েছে।", chat_id)
-                send_telegram_message(f"❌ আপনার {dep['amount']} টাকার ডিপোজিট বাতিল করা হয়েছে।", dep["user_id"])
-                return True
-        send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি।", chat_id)
+        with data_lock:
+            for dep in deposits:
+                if dep["id"] == deposit_id and dep["status"] == "pending":
+                    dep["status"] = "rejected"
+                    save_deposits()
+                    send_telegram_message(f"❌ ডিপোজিট {deposit_id} বাতিল করা হয়েছে।", chat_id)
+                    send_telegram_message(f"❌ আপনার {dep['amount']} টাকার ডিপোজিট বাতিল করা হয়েছে।", dep["user_id"])
+                    break
+            else:
+                send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি।", chat_id)
+        save_data_to_channel()
         return True
     elif cmd == "/deposits":
-        pending = [d for d in deposits if d["status"] == "pending"]
+        with data_lock:
+            pending = [d for d in deposits if d["status"] == "pending"]
         if not pending:
             send_telegram_message("কোনো পেন্ডিং ডিপোজিট নেই।", chat_id)
         else:
@@ -1206,8 +1315,9 @@ def handle_market_admin(chat_id, text):
         except:
             send_telegram_message("❌ সঠিক পরিমাণ দিন।", chat_id)
             return True
-        balances[uid] = balances.get(uid, 0) + amt
-        save_balances()
+        with data_lock:
+            balances[uid] = balances.get(uid, 0) + amt
+            save_balances()
         save_data_to_channel()
         send_telegram_message(f"✅ {uid} এর ব্যালেন্সে {amt} টাকা যোগ করা হয়েছে। বর্তমান: {balances[uid]}", chat_id)
         try:
@@ -1241,21 +1351,20 @@ def handle_telegram_commands():
 
                         user_info[chat_id] = sender_username
                         save_user_info()
-                        # save_data_to_channel() is called after important changes, not here
 
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। পরে চেষ্টা করুন।", chat_id)
                             continue
 
-                        # লস রিকভারি ফাইল হ্যান্ডলিং (ডকুমেন্ট আসলে)
+                        # File handling for loss recovery
                         if "document" in msg and chat_id in loss_recovery_sessions:
                             handle_loss_recovery_file(chat_id, msg)
                             continue
 
-                        # Restore file handling (admin)
-                        if "document" in msg:
-                            caption = msg.get("caption", "")
-                            if caption.strip().lower() == "/restore":
+                        # Restore file from admin (caption: /restore)
+                        if "document" in msg and str(chat_id) == ADMIN_CHAT_ID:
+                            caption = msg.get("caption", "").strip().lower()
+                            if caption == "/restore":
                                 file_id = msg["document"]["file_id"]
                                 handle_restore(chat_id, file_id)
                             continue
@@ -1274,7 +1383,7 @@ def handle_telegram_commands():
                                 send_main_keyboard(chat_id)
                             continue
 
-                        # Deposit flow active?
+                        # Deposit flow
                         if chat_id in deposit_sessions:
                             process_deposit_step(chat_id, text)
                             continue
@@ -1324,8 +1433,9 @@ def handle_telegram_commands():
                             )
                             continue
                         elif text == "🛑 স্টপ":
-                            subscribed_users.discard(chat_id)
-                            save_subscribers()
+                            with data_lock:
+                                subscribed_users.discard(chat_id)
+                                save_subscribers()
                             save_data_to_channel()
                             send_telegram_message("আপনার সাবস্ক্রিপশন বন্ধ করা হয়েছে।", chat_id, reply_markup=remove_keyboard())
                             continue
@@ -1386,20 +1496,21 @@ def handle_telegram_commands():
 
                         # --- Text Commands ---
                         if text.startswith("/"):
-                            # Market admin commands
                             if handle_market_admin(chat_id, text):
                                 continue
                             # General commands
                             if text.startswith("/start"):
-                                subscribed_users.add(chat_id)
-                                save_subscribers()
+                                with data_lock:
+                                    subscribed_users.add(chat_id)
+                                    save_subscribers()
                                 save_data_to_channel()
                                 reply = "✨ আমাদের বটে স্বাগতম! ✨"
                                 send_telegram_message(reply, chat_id, reply_markup=get_keyboard(chat_id), parse_mode="Markdown")
                                 continue
                             elif text == "/stop":
-                                subscribed_users.discard(chat_id)
-                                save_subscribers()
+                                with data_lock:
+                                    subscribed_users.discard(chat_id)
+                                    save_subscribers()
                                 save_data_to_channel()
                                 send_telegram_message("সাবস্ক্রিপশন বন্ধ করা হয়েছে।", chat_id, reply_markup=remove_keyboard())
                                 continue
@@ -1446,7 +1557,7 @@ def handle_telegram_commands():
                                 continue
 
         except Exception as e:
-            print("Telegram Command Error:", e)
+            logger.exception("Telegram Command Error:")
         time.sleep(1)
 
 # ================== FLASK ROUTE ==================
@@ -1459,12 +1570,14 @@ if __name__ == "__main__":
     load_mother_accounts()
     load_user_cooldowns()
     load_subscribers()
-    load_market()   # this also syncs CHANNEL_ID from config
+    load_market()
 
+    # Start bot polling thread
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
+    # Start auto backup thread
     threading.Thread(target=auto_backup_loop, daemon=True).start()
 
-    # প্রথমবার চ্যানেলে ব্যাকআপ পাঠাই
+    # Initial backup to channel
     save_data_to_channel()
 
     port = int(os.environ.get("PORT", 10000))

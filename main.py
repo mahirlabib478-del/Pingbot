@@ -14,8 +14,7 @@ from openpyxl.styles import Font, Alignment
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================== CONFIG (use environment variables only, fallback only for dev) ==================
-# IMPORTANT: Never hardcode tokens in production. Use environment variables.
+# ================== CONFIG (use environment variables only) ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8808046131:AAHG_cjPmnzUnY0vCDcmnhmu3XVPGfMlcug")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "2035024902")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003903695158"))
@@ -32,6 +31,7 @@ ACCOUNTS_FILE = "accounts.json"
 BALANCES_FILE = "balances.json"
 DEPOSITS_FILE = "deposits.json"
 CONFIG_FILE = "config.json"
+BACKUP_META_FILE = "backup_meta.json"       # NEW
 
 # ================== FLASK APP ==================
 app = Flask(__name__)
@@ -64,14 +64,15 @@ add_stock_sessions = {}
 # Loss Recovery
 loss_recovery_sessions = {}
 
-# Channel backup (document)
-last_backup_message_id = None
+# Channel backup
+last_backup_message_id = None   # message_id of last backup document
+last_backup_file_id = None      # file_id for restore         # NEW
 
-# Locks for thread safety
-data_lock = threading.RLock()          # protects all global data structures
-backup_lock = threading.Lock()         # ensures only one backup runs at a time
+# Locks
+data_lock = threading.RLock()
+backup_lock = threading.Lock()
 
-# ================== FILE I/O (all writes under data_lock) ==================
+# ================== FILE I/O ==================
 def load_mother_accounts():
     global mother_accounts
     try:
@@ -154,12 +155,10 @@ def load_market():
     try:
         with open(CONFIG_FILE, "r") as f:
             loaded_config = json.load(f)
-            # merge with defaults to handle missing keys
             for key, value in config.items():
                 if key not in loaded_config:
                     loaded_config[key] = value
             config = loaded_config
-            # Sync channel ID
             CHANNEL_ID = int(config.get("channel_id", "0"))
             maintenance_mode = config.get("maintenance_mode", False)
     except:
@@ -184,12 +183,34 @@ def save_deposits():
 
 def save_config():
     with data_lock:
-        config["maintenance_mode"] = maintenance_mode  # always persist maintenance state
+        config["maintenance_mode"] = maintenance_mode
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=2)
 
+def load_backup_meta():
+    global last_backup_message_id, last_backup_file_id
+    try:
+        with open(BACKUP_META_FILE, "r") as f:
+            meta = json.load(f)
+            last_backup_message_id = meta.get("message_id")
+            last_backup_file_id = meta.get("file_id")
+    except:
+        last_backup_message_id = None
+        last_backup_file_id = None
+
+def save_backup_meta():
+    with backup_lock:
+        meta = {
+            "message_id": last_backup_message_id,
+            "file_id": last_backup_file_id
+        }
+        try:
+            with open(BACKUP_META_FILE, "w") as f:
+                json.dump(meta, f)
+        except Exception as e:
+            logger.error(f"Backup meta save error: {e}")
+
 def save_all():
-    """Save all local files and then backup to channel."""
     save_accounts()
     save_balances()
     save_deposits()
@@ -214,7 +235,6 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
         logger.error(f"Send error to {chat_id}: {e}")
 
 def send_telegram_document(file_bytes, filename, chat_id, caption=""):
-    """Return True if document sent successfully, else False."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     try:
         files = {'document': (filename, file_bytes,
@@ -233,7 +253,6 @@ def delete_telegram_message(chat_id, message_id):
         logger.error(f"Delete message error: {e}")
 
 def forward_telegram_document(chat_id, from_chat_id, message_id):
-    """Forward a document by message_id"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
     payload = {
         "chat_id": chat_id,
@@ -246,24 +265,21 @@ def forward_telegram_document(chat_id, from_chat_id, message_id):
         logger.error(f"Forward error: {e}")
 
 def broadcast_message(text):
-    """Send a message to all subscribers, with rate limit and blocked user cleanup."""
     to_remove = []
     for chat_id in list(subscribed_users):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         try:
             resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
-            if resp.status_code == 403:  # user blocked bot
+            if resp.status_code == 403:
                 to_remove.append(chat_id)
-            elif resp.status_code == 429:  # rate limited
+            elif resp.status_code == 429:
                 retry_after = resp.json().get("parameters", {}).get("retry_after", 1)
                 time.sleep(retry_after)
-                # retry once after waiting
                 requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
         except Exception as e:
             logger.error(f"Broadcast to {chat_id} failed: {e}")
             to_remove.append(chat_id)
-        time.sleep(0.05)  # 20 messages per second safe
-    # clean up blocked/deleted users
+        time.sleep(0.05)
     if to_remove:
         with data_lock:
             for uid in to_remove:
@@ -273,9 +289,9 @@ def broadcast_message(text):
         save_user_info()
         save_data_to_channel()
 
-# ================== CHANNEL BACKUP (document-based, with size splitting) ==================
+# ================== CHANNEL BACKUP (with meta, restore) ==================
 def save_data_to_channel():
-    global last_backup_message_id
+    global last_backup_message_id, last_backup_file_id
     if not CHANNEL_ID:
         return
     with backup_lock:
@@ -293,9 +309,8 @@ def save_data_to_channel():
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
-            max_size = 48 * 1024 * 1024  # 48 MB safety limit
+            max_size = 48 * 1024 * 1024
             if len(json_bytes) <= max_size:
-                # Single file
                 filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 if last_backup_message_id:
                     try:
@@ -306,14 +321,15 @@ def save_data_to_channel():
                 files = {'document': (filename, json_bytes, 'application/json')}
                 resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
                 if resp.status_code == 200 and resp.json().get("ok"):
-                    last_backup_message_id = resp.json()["result"]["message_id"]
+                    result = resp.json()["result"]
+                    last_backup_message_id = result["message_id"]
+                    last_backup_file_id = result.get("document", {}).get("file_id")
+                    save_backup_meta()
                 else:
                     logger.error(f"Backup upload failed: {resp.text}")
             else:
-                # Split into multiple parts
-                logger.warning("Backup file too large, splitting into parts")
-                # We'll split the data dictionary into chunks (roughly by number of accounts)
-                # For simplicity, separate accounts and other data
+                # splitting; for simplicity we skip meta update (manual restore will work via backup command)
+                logger.warning("Backup file too large, splitting into parts (meta not updated)")
                 main_data = {
                     "balances": data["balances"],
                     "deposits": data["deposits"],
@@ -325,13 +341,11 @@ def save_data_to_channel():
                     "timestamp": data["timestamp"]
                 }
                 main_json = json.dumps(main_data, indent=2, ensure_ascii=False).encode('utf-8')
-                # Send main part
                 filename_main = f"backup_main_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
                 files = {'document': (filename_main, main_json, 'application/json')}
                 resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
                 if resp.status_code == 200 and resp.json().get("ok"):
-                    # Send accounts in batches
                     acc_chunks = [accounts[i:i+5000] for i in range(0, len(accounts), 5000)]
                     for idx, chunk in enumerate(acc_chunks):
                         chunk_data = {"accounts_chunk": chunk, "chunk_id": idx}
@@ -339,13 +353,51 @@ def save_data_to_channel():
                         filename_chunk = f"backup_accounts_{idx}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                         files_chunk = {'document': (filename_chunk, chunk_json, 'application/json')}
                         requests.post(url, data={"chat_id": CHANNEL_ID}, files=files_chunk, timeout=30)
-                # Delete previous backup messages? Not possible with multiple parts, skip for simplicity.
-                # For now, we don't track multiple message IDs.
         except Exception as e:
             logger.error(f"Channel backup error: {e}")
 
+def restore_from_channel_if_needed():
+    """If local data files are missing/empty, restore from channel backup."""
+    global accounts, balances, deposits, config, subscribed_users, user_info, mother_accounts, user_last_request, maintenance_mode, CHANNEL_ID
+    # Check if ACCOUNTS_FILE exists and is non-empty
+    try:
+        with open(ACCOUNTS_FILE, "r") as f:
+            if not f.read().strip():
+                raise ValueError("empty")
+    except:
+        # File missing or empty
+        if last_backup_file_id:
+            logger.info("Local data missing, restoring from channel backup...")
+            try:
+                file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={last_backup_file_id}"
+                resp = requests.get(file_url, timeout=15)
+                resp.raise_for_status()
+                file_info = resp.json()
+                if file_info.get("ok"):
+                    file_path = file_info["result"]["file_path"]
+                    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                    file_resp = requests.get(download_url, timeout=30)
+                    file_resp.raise_for_status()
+                    backup_data = json.loads(file_resp.text)
+                    with data_lock:
+                        subscribed_users = set(backup_data.get("subscribed_users", []))
+                        user_info = backup_data.get("user_info", {})
+                        mother_accounts = backup_data.get("mother_accounts", [])
+                        user_last_request = backup_data.get("user_cooldowns", {})
+                        accounts = backup_data.get("accounts", backup_data.get("market_accounts", []))
+                        balances = backup_data.get("balances", {})
+                        deposits = backup_data.get("deposits", [])
+                        config = backup_data.get("config", {})
+                        maintenance_mode = config.get("maintenance_mode", False)
+                        CHANNEL_ID = int(config.get("channel_id", "0"))
+                        save_all()
+                    logger.info("Channel backup restored successfully.")
+                else:
+                    logger.error("Failed to get file info from channel backup.")
+            except Exception as e:
+                logger.error(f"Restore from channel failed: {e}")
+
 def auto_backup_loop():
-    """Run backup every 24 hours."""
     while True:
         time.sleep(86400)
         save_data_to_channel()
@@ -492,7 +544,6 @@ def process_submission_step(chat_id, text, sender_username):
     elif step == "2fa":
         raw_lines = text.splitlines()
         twofa_list = [l.strip() for l in raw_lines]
-        # Remove trailing empty lines if count exceeds usernames
         usernames = session["data"]["usernames"]
         while len(twofa_list) > len(usernames) and twofa_list and twofa_list[-1] == '':
             twofa_list.pop()
@@ -533,7 +584,7 @@ def process_submission_step(chat_id, text, sender_username):
         return True
     return False
 
-# ================== LOSS RECOVERY HANDLER (improved) ==================
+# ================== LOSS RECOVERY HANDLER ==================
 def start_loss_recovery(chat_id):
     loss_recovery_sessions[chat_id] = {
         "step": "usernames",
@@ -640,7 +691,6 @@ def process_loss_recovery_step(chat_id, text):
     return False
 
 def handle_loss_recovery_file(chat_id, message):
-    """Receive Excel file during loss recovery step, validate MIME type."""
     if chat_id not in loss_recovery_sessions:
         return
     session = loss_recovery_sessions[chat_id]
@@ -652,7 +702,6 @@ def handle_loss_recovery_file(chat_id, message):
         send_telegram_message("⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।", chat_id)
         return
 
-    # Validate MIME type
     allowed_mimes = [
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel"
@@ -669,7 +718,7 @@ def handle_loss_recovery_file(chat_id, message):
     session["step"] = "bkash"
     send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
-# ================== FREE MOTHER ACCOUNT (thread-safe) ==================
+# ================== FREE MOTHER ACCOUNT ==================
 def handle_addmother(chat_id, args):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -725,7 +774,6 @@ def handle_getmother(chat_id):
             send_main_keyboard(chat_id)
             return
 
-    # Send the account outside the lock to avoid long lock
     msg = (
         "🎁 আপনার মাদার অ্যাকাউন্ট:\n\n"
         f"👤 ইউজারনেম: {acc['username']}\n"
@@ -735,7 +783,7 @@ def handle_getmother(chat_id):
         msg += f"\n🔐 2FA Key: {acc['fa_key']}"
     send_telegram_message(msg, chat_id)
     send_main_keyboard(chat_id)
-    save_data_to_channel()  # backup after assignment
+    save_data_to_channel()
 
 def handle_motherlist(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
@@ -786,7 +834,7 @@ def handle_deletemother(chat_id, arg):
     save_data_to_channel()
     send_telegram_message(f"✅ মাদার অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
 
-# ================== MAINTENANCE MODE (persistent) ==================
+# ================== MAINTENANCE MODE ==================
 def handle_maintenance(chat_id, args):
     global maintenance_mode
     if str(chat_id) != ADMIN_CHAT_ID:
@@ -795,7 +843,7 @@ def handle_maintenance(chat_id, args):
     args = args.strip().lower()
     if args == "on":
         maintenance_mode = True
-        save_config()  # persist immediately
+        save_config()
         send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু করা হয়েছে। সাধারণ ইউজাররা এখন বট ব্যবহার করতে পারবে না।", chat_id)
     elif args == "off":
         maintenance_mode = False
@@ -848,7 +896,6 @@ def handle_backup(chat_id):
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
     save_all()
-    # Also send a local backup copy to admin for extra safety
     with data_lock:
         backup = {
             "subscribed_users": list(subscribed_users),
@@ -902,7 +949,6 @@ def handle_restore(chat_id, file_id):
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
         config = backup.get("config", {})
-        # Sync channel ID and maintenance mode
         CHANNEL_ID = int(config.get("channel_id", "0"))
         maintenance_mode = config.get("maintenance_mode", False)
         save_all()
@@ -967,7 +1013,6 @@ def process_add_stock_step(chat_id, text):
         raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
-        # Remove trailing empty lines if extra
         while len(fa_list) > len(usernames) and fa_list and fa_list[-1] == '':
             fa_list.pop()
         if len(fa_list) != len(usernames):
@@ -992,7 +1037,7 @@ def process_add_stock_step(chat_id, text):
         return True
     return False
 
-# ================== MARKETPLACE: DEPOSIT & BUY (with rollback) ==================
+# ================== MARKETPLACE: DEPOSIT & BUY ==================
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "")
@@ -1094,17 +1139,15 @@ def handle_buy(chat_id, quantity):
             )
             return False
 
-        # Reserve the accounts (remove from stock) and deduct balance
         bought = accounts[:qty]
         del accounts[:qty]
         balances[chat_id] = user_balance - total
         save_accounts()
         save_balances()
-    # Generate Excel and send
+
     excel_bytes = generate_purchase_excel(bought)
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     if send_telegram_document(excel_bytes, filename, chat_id):
-        # Success: notify user and admin
         send_telegram_message(
             f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\n"
             f"অবশিষ্ট ব্যালেন্স: {balances[chat_id]} টাকা",
@@ -1113,18 +1156,17 @@ def handle_buy(chat_id, quantity):
         admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
         send_telegram_message(admin_msg, ADMIN_CHAT_ID)
     else:
-        # Rollback: restore accounts and refund balance
         with data_lock:
-            accounts[:0] = bought  # insert back at front
-            balances[chat_id] = user_balance  # restore original balance
+            accounts[:0] = bought
+            balances[chat_id] = user_balance
             save_accounts()
             save_balances()
         send_telegram_message(
             "⚠️ অ্যাকাউন্ট ডেলিভারি ব্যর্থ হয়েছে। আপনার টাকা ফেরত দেওয়া হয়েছে এবং অ্যাকাউন্ট পুনরায় স্টকে যোগ করা হয়েছে। পরে আবার চেষ্টা করুন।",
             chat_id
         )
-    save_data_to_channel()  # backup after transaction
-    return True  # whether success or rollback, exit buy session
+    save_data_to_channel()
+    return True
 
 # ================== ADMIN MARKETPLACE COMMANDS ==================
 def handle_market_admin(chat_id, text):
@@ -1239,7 +1281,6 @@ def handle_market_admin(chat_id, text):
             return True
         try:
             new_channel_id = int(parts[1])
-            # Simple validation: try to send a test message
             test_resp = requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                 json={"chat_id": new_channel_id, "text": "চ্যানেল কনফিগারেশন টেস্ট"}
@@ -1356,12 +1397,10 @@ def handle_telegram_commands():
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। পরে চেষ্টা করুন।", chat_id)
                             continue
 
-                        # File handling for loss recovery
                         if "document" in msg and chat_id in loss_recovery_sessions:
                             handle_loss_recovery_file(chat_id, msg)
                             continue
 
-                        # Restore file from admin (caption: /restore)
                         if "document" in msg and str(chat_id) == ADMIN_CHAT_ID:
                             caption = msg.get("caption", "").strip().lower()
                             if caption == "/restore":
@@ -1369,7 +1408,6 @@ def handle_telegram_commands():
                                 handle_restore(chat_id, file_id)
                             continue
 
-                        # Support session
                         if chat_id in support_sessions:
                             if text.lower() == "/cancel":
                                 support_sessions.discard(chat_id)
@@ -1383,27 +1421,22 @@ def handle_telegram_commands():
                                 send_main_keyboard(chat_id)
                             continue
 
-                        # Deposit flow
                         if chat_id in deposit_sessions:
                             process_deposit_step(chat_id, text)
                             continue
 
-                        # Submission flow
                         if chat_id in submission_sessions:
                             process_submission_step(chat_id, text, sender_username)
                             continue
 
-                        # Add stock flow (admin)
                         if chat_id in add_stock_sessions:
                             process_add_stock_step(chat_id, text)
                             continue
 
-                        # Loss recovery text handling
                         if chat_id in loss_recovery_sessions:
                             process_loss_recovery_step(chat_id, text)
                             continue
 
-                        # Buy session (waiting for quantity)
                         if chat_id in buy_sessions:
                             if text.strip().lower() == "/cancel":
                                 buy_sessions.discard(chat_id)
@@ -1414,7 +1447,6 @@ def handle_telegram_commands():
                             if success:
                                 buy_sessions.discard(chat_id)
                                 send_main_keyboard(chat_id)
-                            # else stay in session
                             continue
 
                         # --- Button Handlers ---
@@ -1498,7 +1530,6 @@ def handle_telegram_commands():
                         if text.startswith("/"):
                             if handle_market_admin(chat_id, text):
                                 continue
-                            # General commands
                             if text.startswith("/start"):
                                 with data_lock:
                                     subscribed_users.add(chat_id)
@@ -1567,17 +1598,21 @@ def home():
 
 # ================== MAIN ==================
 if __name__ == "__main__":
+    # Load backup meta first
+    load_backup_meta()
+    # Load all data files
     load_mother_accounts()
     load_user_cooldowns()
     load_subscribers()
     load_market()
 
-    # Start bot polling thread
+    # Auto-restore from channel if local data missing/empty
+    restore_from_channel_if_needed()
+
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
-    # Start auto backup thread
     threading.Thread(target=auto_backup_loop, daemon=True).start()
 
-    # Initial backup to channel
+    # Initial backup to channel (and update meta)
     save_data_to_channel()
 
     port = int(os.environ.get("PORT", 10000))

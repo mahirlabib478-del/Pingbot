@@ -15,9 +15,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (use environment variables only) ==================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8808046131:AAHG_cjPmnzUnY0vCDcmnhmu3XVPGfMlcug")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "2035024902")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003903695158"))
+BOT_TOKEN = "8808046131:AAHG_cjPmnzUnY0vCDcmnhmu3XVPGfMlcug"
+ADMIN_CHAT_ID = "2035024902"
+CHANNEL_ID = "-1003903695158"
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set in environment variables")

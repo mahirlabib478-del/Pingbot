@@ -283,7 +283,8 @@ def send_telegram_document(file_bytes, filename, chat_id, caption=""):
     try:
         files = {'document': (filename, file_bytes,
                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-        resp = requests.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
+        # Increased timeout for larger files
+        resp = requests.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=(10, 300))
         return resp.status_code == 200 and resp.json().get("ok", False)
     except Exception as e:
         logger.error(f"Document send error: {e}")
@@ -370,7 +371,8 @@ def save_data_to_channel():
             filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
             files = {'document': (filename, compressed, 'application/gzip')}
-            resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
+            # Extended timeout for large backup uploads
+            resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=(10, 300))
 
             if resp.status_code == 200 and resp.json().get("ok"):
                 last_backup_message_id = resp.json()["result"]["message_id"]
@@ -926,7 +928,7 @@ def handle_admin_send(chat_id, target_id, message):
     send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{message}", target_id)
     send_telegram_message(f"✅ {target_id} কে মেসেজ পাঠানো হয়েছে।", chat_id)
 
-# ================== BACKUP & RESTORE ==================
+# ================== BACKUP & RESTORE (with extended timeouts) ==================
 def handle_backup(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -964,24 +966,32 @@ def handle_restore(chat_id, file_id):
         send_telegram_message("❌ ব্যাকআপ রিস্টোর করতে ব্যর্থ হয়েছে।", chat_id)
 
 def _perform_restore(file_id):
-    """Download and restore from a Telegram document file_id. Supports gzip."""
+    """Download and restore from a Telegram document file_id. Supports gzip.
+    Timeouts set to 5 minutes to handle slow connections on Render."""
     try:
+        # Step 1: Get file info
         get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-        resp = requests.get(get_file_url, timeout=15)
+        resp = requests.get(get_file_url, timeout=(10, 300))  # 10s connect, 5min read
         resp.raise_for_status()
         file_data = resp.json()
         if not file_data.get("ok"):
             logger.error("getFile failed")
             return False
+
         file_path = file_data["result"]["file_path"]
         download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        file_resp = requests.get(download_url, timeout=30)
+
+        # Step 2: Download file with 5-minute read timeout
+        file_resp = requests.get(download_url, timeout=(10, 300))
         file_resp.raise_for_status()
         content = file_resp.content
+
+        # Decompress if gzip
         try:
             content = gzip.decompress(content)
         except gzip.BadGzipFile:
             pass
+
         backup = json.loads(content.decode('utf-8'))
     except Exception as e:
         logger.error(f"_perform_restore error: {e}")
@@ -1356,7 +1366,6 @@ def process_sell_step(chat_id, text):
         )
 
         # Generate Excel file and send to admin
-        # Get telegram username from user_info or use chat_id
         tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
         excel_bytes = generate_sell_excel(accounts_list, tg_username)
         filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -1369,7 +1378,6 @@ def process_sell_step(chat_id, text):
             f"বাতিল: /rejectsell {sell_id}"
         )
         if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
-            # Fallback text message if document fails
             fallback_text = (
                 f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\n"
                 f"আইডি: {sell_id}\n"
@@ -1414,7 +1422,6 @@ def process_withdraw_step(chat_id, text):
         except:
             send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id)
             return True
-        # Check balance
         with data_lock:
             bal = balances.get(str(chat_id), 0)
         if amount > bal:
@@ -1468,7 +1475,7 @@ def process_withdraw_step(chat_id, text):
         return True
     return False
 
-# ================== ADMIN MARKETPLACE COMMANDS (with sell/withdraw) ==================
+# ================== ADMIN MARKETPLACE COMMANDS ==================
 def admin_addstock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -1668,7 +1675,7 @@ def admin_addbalance_cmd(chat_id, uid, amt_str):
         pass
     return True
 
-# ================== NEW ADMIN SELL/WITHDRAW COMMANDS ==================
+# ================== ADMIN SELL/WITHDRAW COMMANDS ==================
 def admin_sell_requests_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -1784,7 +1791,7 @@ def admin_rejectwithdraw_cmd(chat_id, w_id):
     save_data_to_channel()
     return True
 
-# Central admin command dispatcher (refactored)
+# Central admin command dispatcher
 def handle_market_admin(chat_id, text):
     parts = text.split()
     if not parts:
@@ -1979,7 +1986,6 @@ def handle_telegram_commands():
                             start_deposit(chat_id)
                             continue
                         elif text == "🛒 একাউন্ট কিনুন":
-                            # Show loss recovery info first
                             send_telegram_message(
                                 "ইনস্টাগ্রাম কুকিজ এর কাজ যারা করেন আমাদের থেকে একাউন্ট কিনে কুকিজ সাবমিট দিলে "
                                 "যদি রিপোর্ট খারাপ হওয়ার কারণে আপনার লস হয় তবে আপনি লস রিকভারি অপশন থেকে "

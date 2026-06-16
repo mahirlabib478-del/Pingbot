@@ -16,13 +16,13 @@ from openpyxl.styles import Font, Alignment
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================== CONFIG (use environment variables only, no fallback) ==================
+# ================== CONFIG ==================
 BOT_TOKEN = "8808046131:AAHCgB22O9KtwtIKrfXpMOBrPZRzNvN-3oo"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set in environment variables")
+    raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set")
 
 # ================== FILE PATHS ==================
 MOTHER_FILE = "mother_accounts.json"
@@ -33,11 +33,12 @@ ACCOUNTS_FILE = "accounts.json"
 BALANCES_FILE = "balances.json"
 DEPOSITS_FILE = "deposits.json"
 CONFIG_FILE = "config.json"
+SELL_REQUESTS_FILE = "sell_requests.json"
+WITHDRAW_REQUESTS_FILE = "withdraw_requests.json"
 
-# ================== FLASK APP ==================
 app = Flask(__name__)
 
-# ================== GLOBALS & LOCKS ==================
+# ================== GLOBALS ==================
 last_update_id = None
 subscribed_users = set()
 user_info = {}
@@ -47,7 +48,6 @@ submission_sessions = {}
 support_sessions = set()
 maintenance_mode = False
 
-# Marketplace
 accounts = []
 balances = {}
 deposits = []
@@ -61,18 +61,17 @@ config = {
 deposit_sessions = {}
 buy_sessions = set()
 add_stock_sessions = {}
-
-# Loss Recovery
 loss_recovery_sessions = {}
-
-# Channel backup (document)
+sell_sessions = {}
+sell_requests = []
+withdraw_requests = []
+withdraw_sessions = {}
 last_backup_message_id = None
 
-# Locks for thread safety
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 
-# ================== FILE I/O (specific exceptions, no bare except) ==================
+# ================== FILE I/O ==================
 def load_mother_accounts():
     global mother_accounts
     try:
@@ -199,8 +198,39 @@ def save_config():
         except IOError as e:
             logger.error(f"Config save error: {e}")
 
+def load_sell_requests():
+    global sell_requests
+    try:
+        with open(SELL_REQUESTS_FILE, "r") as f:
+            sell_requests = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        sell_requests = []
+
+def save_sell_requests():
+    with data_lock:
+        try:
+            with open(SELL_REQUESTS_FILE, "w") as f:
+                json.dump(sell_requests, f, indent=2)
+        except IOError as e:
+            logger.error(f"Sell requests save error: {e}")
+
+def load_withdraw_requests():
+    global withdraw_requests
+    try:
+        with open(WITHDRAW_REQUESTS_FILE, "r") as f:
+            withdraw_requests = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        withdraw_requests = []
+
+def save_withdraw_requests():
+    with data_lock:
+        try:
+            with open(WITHDRAW_REQUESTS_FILE, "w") as f:
+                json.dump(withdraw_requests, f, indent=2)
+        except IOError as e:
+            logger.error(f"Withdraw requests save error: {e}")
+
 def save_all():
-    """Save all local files and then backup to channel."""
     save_accounts()
     save_balances()
     save_deposits()
@@ -209,11 +239,12 @@ def save_all():
     save_user_info()
     save_mother_accounts()
     save_user_cooldowns()
+    save_sell_requests()
+    save_withdraw_requests()
     save_data_to_channel()
 
 # ================== TELEGRAM HELPERS ==================
 def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
-    """Send message with retry on rate limit (429)."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
@@ -236,7 +267,6 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
     return None
 
 def send_telegram_document(file_bytes, filename, chat_id, caption=""):
-    """Return True if document sent successfully, else False."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     try:
         files = {'document': (filename, file_bytes,
@@ -256,20 +286,13 @@ def delete_telegram_message(chat_id, message_id):
 
 def forward_telegram_document(chat_id, from_chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessage"
-    payload = {
-        "chat_id": chat_id,
-        "from_chat_id": from_chat_id,
-        "message_id": message_id
-    }
+    payload = {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         logger.error(f"Forward error: {e}")
 
 def broadcast_message(text):
-    """Send a message to all subscribers, with rate limit and blocked user cleanup.
-       FIX 3: Removed save_data_to_channel() call to avoid unnecessary I/O.
-    """
     to_remove = []
     for chat_id in list(subscribed_users):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -292,10 +315,8 @@ def broadcast_message(text):
                 user_info.pop(uid, None)
         save_subscribers()
         save_user_info()
-        # Manual channel backup after a significant change can be done if needed,
-        # but not on every broadcast.
 
-# ================== CHANNEL BACKUP (compressed, single file) ==================
+# ================== CHANNEL BACKUP ==================
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID:
@@ -312,17 +333,17 @@ def save_data_to_channel():
                     "user_info": user_info,
                     "mother_accounts": mother_accounts,
                     "user_cooldowns": user_last_request,
+                    "sell_requests": sell_requests,
+                    "withdraw_requests": withdraw_requests,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
-            # FIX 5: Compress JSON with gzip to avoid splitting
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
             compressed = gzip.compress(json_bytes, compresslevel=6)
-            max_size = 48 * 1024 * 1024  # 48 MB safety limit (Telegram 50 MB)
+            max_size = 48 * 1024 * 1024
             if len(compressed) > max_size:
                 logger.warning("Compressed backup too large, cannot upload to Telegram")
                 return
 
-            # Delete old pinned backup
             if last_backup_message_id:
                 try:
                     delete_telegram_message(CHANNEL_ID, last_backup_message_id)
@@ -332,11 +353,10 @@ def save_data_to_channel():
             filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
             files = {'document': (filename, compressed, 'application/gzip')}
-            resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=30)
+            resp = requests.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
 
             if resp.status_code == 200 and resp.json().get("ok"):
                 last_backup_message_id = resp.json()["result"]["message_id"]
-                # Auto-pin the backup
                 pin_url = f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage"
                 requests.post(pin_url, json={
                     "chat_id": CHANNEL_ID,
@@ -359,7 +379,8 @@ def auto_backup_loop():
 def get_keyboard(chat_id):
     keyboard = [
         ["💰 ব্যালেন্স", "💸 ডিপোজিট"],
-        ["🛒 একাউন্ট কিনুন"],
+        ["🛒 একাউন্ট কিনুন", "💰 বিক্রয় করুন"],
+        ["💸 উইথড্র"],
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
         ["📞 সাপোর্ট", "🛑 স্টপ"],
         ["🔄 লস রিকভারি"]
@@ -367,12 +388,13 @@ def get_keyboard(chat_id):
     if str(chat_id) == ADMIN_CHAT_ID:
         keyboard.append(["📥 ডিপোজিট রিকোয়েস্ট", "➕ স্টক যোগ করুন"])
         keyboard.append(["📦 স্টক দেখুন", "🗑️ স্টক ডিলিট"])
+        keyboard.append(["📊 সেল requests", "💳 withdraw requests"])
     return {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": False}
 
 def remove_keyboard():
     return {"remove_keyboard": True}
 
-def send_main_keyboard(chat_id, text="\u200b"):  # FIX 12: zero-width space instead of empty
+def send_main_keyboard(chat_id, text="\u200b"):
     send_telegram_message(text, chat_id, reply_markup=get_keyboard(chat_id))
 
 # ================== EXCEL GENERATORS ==================
@@ -437,13 +459,36 @@ def generate_purchase_excel(bought):
     output.seek(0)
     return output.read()
 
+def generate_sell_excel(accounts_list, telegram_username):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sell Request"
+    headers = ["Username", "Password", "2FA Key", "Telegram Username"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for acc in accounts_list:
+        ws.append([acc["username"], acc["password"], acc.get("fa_key", ""), telegram_username])
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        ws.column_dimensions[column].width = adjusted_width
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.read()
+
 # ================== SUBMISSION HANDLER ==================
 def start_submission(chat_id, sender_username):
-    submission_sessions[chat_id] = {
-        "step": "username",
-        "data": {},
-        "username": sender_username
-    }
+    submission_sessions[chat_id] = {"step": "username", "data": {}, "username": sender_username}
     send_telegram_message(
         "📋 দয়া করে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n\n"
         "উদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে আবার শুরু করতে পারেন।",
@@ -453,16 +498,13 @@ def start_submission(chat_id, sender_username):
 def process_submission_step(chat_id, text, sender_username):
     if chat_id not in submission_sessions:
         return False
-    # FIX 6: Handle /start as cancel
     if text.strip().lower() == "/start":
         del submission_sessions[chat_id]
         send_telegram_message("❌ জমা প্রক্রিয়া বাতিল করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
-
     session = submission_sessions[chat_id]
     step = session["step"]
-
     if step == "username":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
@@ -470,31 +512,18 @@ def process_submission_step(chat_id, text, sender_username):
             return True
         session["data"]["usernames"] = lines
         session["step"] = "password"
-        send_telegram_message(
-            "🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\n"
-            f"আপনার ইউজারনেম সংখ্যা: {len(lines)}",
-            chat_id
-        )
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}", chat_id)
         return True
-
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["data"]["usernames"]
         if len(lines) != len(usernames):
-            send_telegram_message(
-                f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।",
-                chat_id
-            )
+            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।", chat_id)
             return True
         session["data"]["passwords"] = lines
         session["step"] = "2fa"
-        send_telegram_message(
-            "🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\n"
-            "যদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।",
-            chat_id
-        )
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         return True
-
     elif step == "2fa":
         raw_lines = text.splitlines()
         twofa_list = [l.strip() for l in raw_lines]
@@ -502,35 +531,26 @@ def process_submission_step(chat_id, text, sender_username):
         while len(twofa_list) > len(usernames) and twofa_list and twofa_list[-1] == '':
             twofa_list.pop()
         if len(twofa_list) != len(usernames):
-            send_telegram_message(
-                f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।",
-                chat_id
-            )
+            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।", chat_id)
             return True
         session["data"]["twofa"] = twofa_list
         session["step"] = "bkash"
         send_telegram_message("💳 দয়া করে আপনার **বিকাশ নম্বর** দিন:", chat_id)
         return True
-
     elif step == "bkash":
         bkash_number = text.strip()
         if not bkash_number:
             send_telegram_message("⚠️ বিকাশ নম্বর খালি রাখা যাবে না। আবার দিন।", chat_id)
             return True
         session["data"]["bkash"] = bkash_number
-        usernames = session["data"]["usernames"]
-        passwords = session["data"]["passwords"]
-        twofa_list = session["data"]["twofa"]
-        bkash = session["data"]["bkash"]
-        tg_username = session["username"]
-        excel_bytes = generate_submission_excel(usernames, passwords, twofa_list, bkash, tg_username)
+        excel_bytes = generate_submission_excel(
+            session["data"]["usernames"], session["data"]["passwords"],
+            session["data"]["twofa"], bkash_number, session["username"]
+        )
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"submission_{chat_id}_{timestamp}.xlsx"
         if send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID):
-            send_telegram_message(
-                "✅ আপনার অ্যাকাউন্ট সফলভাবে জমা হয়েছে।\n\nঅ্যাডমিন শীঘ্রই যোগাযোগ করবে। ধন্যবাদ! 🙏",
-                chat_id
-            )
+            send_telegram_message("✅ আপনার অ্যাকাউন্ট সফলভাবে জমা হয়েছে।\n\nঅ্যাডমিন শীঘ্রই যোগাযোগ করবে। ধন্যবাদ! 🙏", chat_id)
         else:
             send_telegram_message("⚠️ জমা দেওয়ার সময় ত্রুটি হয়েছে, অনুগ্রহ করে পরে চেষ্টা করুন।", chat_id)
         del submission_sessions[chat_id]
@@ -540,10 +560,7 @@ def process_submission_step(chat_id, text, sender_username):
 
 # ================== LOSS RECOVERY HANDLER ==================
 def start_loss_recovery(chat_id):
-    loss_recovery_sessions[chat_id] = {
-        "step": "usernames",
-        "data": {}
-    }
+    loss_recovery_sessions[chat_id] = {"step": "usernames", "data": {}}
     send_telegram_message(
         "⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
         "অনুগ্রহ করে সঠিক তথ্য দিন।\n\n"
@@ -554,16 +571,13 @@ def start_loss_recovery(chat_id):
 def process_loss_recovery_step(chat_id, text):
     if chat_id not in loss_recovery_sessions:
         return False
-    # FIX 6: Handle /start as cancel
     if text.strip().lower() == "/start":
         del loss_recovery_sessions[chat_id]
         send_telegram_message("❌ লস রিকভারি বাতিল করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
-
     session = loss_recovery_sessions[chat_id]
     step = session["step"]
-
     if step == "usernames":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
@@ -571,12 +585,8 @@ def process_loss_recovery_step(chat_id, text):
             return True
         session["data"]["usernames"] = lines
         session["step"] = "cookie_date"
-        send_telegram_message(
-            "📅 কত তারিখে কুকিজ সাবমিট করেছিলেন? (শুধু তারিখের সংখ্যা লিখুন, যেমন: 13 বা 26)",
-            chat_id
-        )
+        send_telegram_message("📅 কত তারিখে কুকিজ সাবমিট করেছিলেন? (শুধু তারিখের সংখ্যা লিখুন, যেমন: 13 বা 26)", chat_id)
         return True
-
     elif step == "cookie_date":
         date_str = text.strip()
         if not date_str.isdigit():
@@ -584,20 +594,11 @@ def process_loss_recovery_step(chat_id, text):
             return True
         session["data"]["cookie_date"] = date_str
         session["step"] = "report_file"
-        send_telegram_message(
-            "📎 এখন রিপোর্ট ফেইল হওয়ার দিনের Excel Report File (.xlsx/.xls) পাঠান।\n\n"
-            "⚠️ Screenshot, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।",
-            chat_id
-        )
+        send_telegram_message("📎 এখন রিপোর্ট ফেইল হওয়ার দিনের Excel Report File (.xlsx/.xls) পাঠান।\n\n⚠️ Screenshot, PDF বা অন্য কোনো ফাইল গ্রহণ করা হবে না।", chat_id)
         return True
-
     elif step == "report_file":
-        send_telegram_message(
-            "⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।",
-             chat_id
-        )
+        send_telegram_message("⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।", chat_id)
         return True
-
     elif step == "bkash":
         bkash = text.strip()
         if not bkash:
@@ -607,20 +608,17 @@ def process_loss_recovery_step(chat_id, text):
         session["step"] = "whatsapp"
         send_telegram_message("📞 আপনার হোয়াটসঅ্যাপ নম্বর দিন:", chat_id)
         return True
-
     elif step == "whatsapp":
         whatsapp = text.strip()
         if not whatsapp:
             send_telegram_message("⚠️ হোয়াটসঅ্যাপ নম্বর দিন।", chat_id)
             return True
         session["data"]["whatsapp"] = whatsapp
-
         usernames = session["data"]["usernames"]
         cookie_date = session["data"]["cookie_date"]
         bkash = session["data"]["bkash"]
         file_id = session["data"].get("report_file_id")
         file_message_id = session["data"].get("report_message_id")
-
         admin_text = (
             "🔄 **নতুন লস রিকভারি রিকোয়েস্ট**\n\n"
             f"👤 ইউজার: {user_info.get(chat_id, chat_id)} (`{chat_id}`)\n"
@@ -630,16 +628,11 @@ def process_loss_recovery_step(chat_id, text):
             f"🔑 ইউজারনেম: " + ", ".join(usernames)
         )
         send_telegram_message(admin_text, ADMIN_CHAT_ID, parse_mode="Markdown")
-
         if file_message_id:
             forward_telegram_document(ADMIN_CHAT_ID, chat_id, file_message_id)
         elif file_id:
             send_telegram_message("⚠️ রিপোর্ট ফাইল ফরওয়ার্ড করা যায়নি, কারণ মেসেজ আইডি পাওয়া যায়নি।", ADMIN_CHAT_ID)
-
-        send_telegram_message(
-            "✅ আপনার লস রিকভারি রিকোয়েস্ট জমা হয়েছে। অ্যাডমিন শীঘ্রই আপনার সাথে যোগাযোগ করবে।",
-            chat_id
-        )
+        send_telegram_message("✅ আপনার লস রিকভারি রিকোয়েস্ট জমা হয়েছে। অ্যাডমিন শীঘ্রই আপনার সাথে যোগাযোগ করবে।", chat_id)
         del loss_recovery_sessions[chat_id]
         send_main_keyboard(chat_id)
         return True
@@ -651,18 +644,14 @@ def handle_loss_recovery_file(chat_id, message):
     session = loss_recovery_sessions[chat_id]
     if session["step"] != "report_file":
         return
-
     doc = message.get("document")
     if not doc:
         send_telegram_message("⚠️ শুধুমাত্র Excel File (.xlsx/.xls) পাঠান।", chat_id)
         return
-
-    # FIX 13: Check file extension in addition to MIME
     file_name = doc.get("file_name", "")
     if not file_name.lower().endswith(('.xlsx', '.xls')):
         send_telegram_message("❌ শুধুমাত্র .xlsx বা .xls এক্সটেনশনের ফাইল গ্রহণ করা হবে।", chat_id)
         return
-
     allowed_mimes = [
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel"
@@ -671,7 +660,6 @@ def handle_loss_recovery_file(chat_id, message):
     if mime not in allowed_mimes:
         send_telegram_message("❌ অবৈধ ফাইল ফরম্যাট। শুধুমাত্র এক্সেল ফাইল গ্রহণ করা হবে।", chat_id)
         return
-
     file_id = doc.get("file_id")
     message_id = message.get("message_id")
     session["data"]["report_file_id"] = file_id
@@ -679,7 +667,7 @@ def handle_loss_recovery_file(chat_id, message):
     session["step"] = "bkash"
     send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
-# ================== FREE MOTHER ACCOUNT ==================
+# ================== MOTHER ACCOUNT ==================
 def handle_addmother(chat_id, args):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -696,13 +684,7 @@ def handle_addmother(chat_id, args):
             if acc["username"] == username and acc["password"] == password:
                 send_telegram_message("⚠️ এই অ্যাকাউন্টটি আগেই যোগ করা আছে।", chat_id)
                 return
-        mother_accounts.append({
-            "username": username,
-            "password": password,
-            "fa_key": fa_key,
-            "assigned_to": None,
-            "assigned_at": None
-        })
+        mother_accounts.append({"username": username, "password": password, "fa_key": fa_key, "assigned_to": None, "assigned_at": None})
         save_mother_accounts()
     save_data_to_channel()
     send_telegram_message(f"✅ মাদার অ্যাকাউন্ট যোগ করা হয়েছে: {username}", chat_id)
@@ -715,13 +697,9 @@ def handle_getmother(chat_id):
         wait_sec = cooldown - (now - last)
         wait_min = int(wait_sec // 60)
         wait_sec_rem = int(wait_sec % 60)
-        send_telegram_message(
-            f"⏳ অনুগ্রহ করে অপেক্ষা করুন। পরবর্তী অ্যাকাউন্ট {wait_min} মিনিট {wait_sec_rem} সেকেন্ড পর নিতে পারবেন।",
-            chat_id)
+        send_telegram_message(f"⏳ অনুগ্রহ করে অপেক্ষা করুন। পরবর্তী অ্যাকাউন্ট {wait_min} মিনিট {wait_sec_rem} সেকেন্ড পর নিতে পারবেন।", chat_id)
         send_main_keyboard(chat_id)
         return
-
-    # FIX 4: Rollback-safe mother account assignment
     selected_acc = None
     with data_lock:
         for acc in mother_accounts:
@@ -732,18 +710,10 @@ def handle_getmother(chat_id):
             send_telegram_message("❌ কোনো মাদার অ্যাকাউন্ট উপলব্ধ নেই। পরে আবার চেষ্টা করুন।", chat_id)
             send_main_keyboard(chat_id)
             return
-        # Do not assign yet
-
-    msg = (
-        "🎁 আপনার মাদার অ্যাকাউন্ট:\n\n"
-        f"👤 ইউজারনেম: {selected_acc['username']}\n"
-        f"🔑 পাসওয়ার্ড: {selected_acc['password']}"
-    )
+    msg = f"🎁 আপনার মাদার অ্যাকাউন্ট:\n\n👤 ইউজারনেম: {selected_acc['username']}\n🔑 পাসওয়ার্ড: {selected_acc['password']}"
     if selected_acc["fa_key"]:
         msg += f"\n🔐 2FA Key: {selected_acc['fa_key']}"
-
     if send_telegram_message(msg, chat_id):
-        # Success: now assign and update cooldown
         with data_lock:
             selected_acc["assigned_to"] = str(chat_id)
             selected_acc["assigned_at"] = now
@@ -773,9 +743,7 @@ def handle_motherlist(chat_id):
                     assigned_time = "কিছুক্ষণ আগে"
                 assigned = f"{acc['assigned_to']} ({assigned_time})"
             twofa = "আছে" if acc.get("fa_key") else "নেই"
-            lines.append(
-                f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {twofa} | বরাদ্দ: {assigned}"
-            )
+            lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {twofa} | বরাদ্দ: {assigned}")
     send_telegram_message("\n".join(lines), chat_id)
 
 def handle_deletemother(chat_id, arg):
@@ -866,7 +834,6 @@ def handle_backup(chat_id):
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
         return
     save_all()
-    # Also send a copy to admin
     with data_lock:
         backup = {
             "subscribed_users": list(subscribed_users),
@@ -877,6 +844,8 @@ def handle_backup(chat_id):
             "balances": balances,
             "deposits": deposits,
             "config": config,
+            "sell_requests": sell_requests,
+            "withdraw_requests": withdraw_requests,
             "timestamp": datetime.datetime.now().isoformat()
         }
     backup_json = json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')
@@ -897,10 +866,9 @@ def handle_restore(chat_id, file_id):
         send_telegram_message("❌ ব্যাকআপ রিস্টোর করতে ব্যর্থ হয়েছে।", chat_id)
 
 def _perform_restore(file_id):
-    """Download and restore from a Telegram document file_id. Supports gzip."""
     try:
         get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-        resp = requests.get(get_file_url, timeout=15)
+        resp = requests.get(get_file_url, timeout=20)
         resp.raise_for_status()
         file_data = resp.json()
         if not file_data.get("ok"):
@@ -908,14 +876,13 @@ def _perform_restore(file_id):
             return False
         file_path = file_data["result"]["file_path"]
         download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        file_resp = requests.get(download_url, timeout=30)
+        file_resp = requests.get(download_url, timeout=60)
         file_resp.raise_for_status()
         content = file_resp.content
-        # Try to decompress if gzip
         try:
             content = gzip.decompress(content)
         except gzip.BadGzipFile:
-            pass  # not compressed, assume plain JSON text
+            pass
         backup = json.loads(content.decode('utf-8'))
     except Exception as e:
         logger.error(f"_perform_restore error: {e}")
@@ -924,6 +891,7 @@ def _perform_restore(file_id):
     with data_lock:
         global subscribed_users, user_info, mother_accounts, user_last_request
         global accounts, balances, deposits, config, CHANNEL_ID, maintenance_mode
+        global sell_requests, withdraw_requests
         subscribed_users = set(backup.get("subscribed_users", []))
         user_info = backup.get("user_info", {})
         mother_accounts = backup.get("mother_accounts", [])
@@ -934,18 +902,19 @@ def _perform_restore(file_id):
         config = backup.get("config", {})
         CHANNEL_ID = int(config.get("channel_id", "0")) if config.get("channel_id") else None
         maintenance_mode = config.get("maintenance_mode", False)
+        sell_requests = backup.get("sell_requests", [])
+        withdraw_requests = backup.get("withdraw_requests", [])
         save_all()
     logger.info("Restore completed successfully")
     return True
 
 def auto_restore_from_channel():
-    """On startup, restore from pinned compressed backup."""
     if not CHANNEL_ID:
         logger.info("Auto-restore skipped: No CHANNEL_ID")
         return
     try:
         get_chat_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}"
-        resp = requests.get(get_chat_url, timeout=10).json()
+        resp = requests.get(get_chat_url, timeout=20).json()
         if not resp.get("ok"):
             logger.warning("Could not get channel info for auto-restore")
             return
@@ -968,25 +937,20 @@ def start_add_stock(chat_id):
         return
     add_stock_sessions[chat_id] = {"step": "usernames"}
     send_telegram_message(
-        "➕ স্টক যোগ করুন\n\n"
-        "প্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n"
-        "উদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
+        "➕ স্টক যোগ করুন\n\nপ্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
         chat_id
     )
 
 def process_add_stock_step(chat_id, text):
     if chat_id not in add_stock_sessions:
         return False
-    # FIX 6: /start cancels
     if text.strip().lower() == "/start":
         del add_stock_sessions[chat_id]
         send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
-
     session = add_stock_sessions[chat_id]
     step = session["step"]
-
     if step == "usernames":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
@@ -994,31 +958,18 @@ def process_add_stock_step(chat_id, text):
             return True
         session["usernames"] = lines
         session["step"] = "passwords"
-        send_telegram_message(
-            "🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\n"
-            f"আপনার ইউজারনেম সংখ্যা: {len(lines)}",
-            chat_id
-        )
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}", chat_id)
         return True
-
     elif step == "passwords":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["usernames"]
         if len(lines) != len(usernames):
-            send_telegram_message(
-                f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।",
-                chat_id
-            )
+            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।", chat_id)
             return True
         session["passwords"] = lines
         session["step"] = "fa_keys"
-        send_telegram_message(
-            "🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\n"
-            "যদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।",
-            chat_id
-        )
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         return True
-
     elif step == "fa_keys":
         raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
@@ -1026,19 +977,12 @@ def process_add_stock_step(chat_id, text):
         while len(fa_list) > len(usernames) and fa_list and fa_list[-1] == '':
             fa_list.pop()
         if len(fa_list) != len(usernames):
-            send_telegram_message(
-                f"❌ 2FA কী সংখ্যা ({len(fa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।",
-                chat_id
-            )
+            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(fa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।", chat_id)
             return True
         count = len(usernames)
         with data_lock:
             for i in range(count):
-                accounts.append({
-                    "username": usernames[i],
-                    "password": session["passwords"][i],
-                    "fa_key": fa_list[i]
-                })
+                accounts.append({"username": usernames[i], "password": session["passwords"][i], "fa_key": fa_list[i]})
             save_accounts()
         save_data_to_channel()
         del add_stock_sessions[chat_id]
@@ -1056,26 +1000,18 @@ def start_deposit(chat_id):
         send_main_keyboard(chat_id)
         deposit_sessions.pop(chat_id, None)
         return
-    send_telegram_message(
-        f"💸 দয়া করে আপনার জমা করার টাকার পরিমাণ লিখুন (শুধু সংখ্যা, যেমন: 100)\n\n"
-        f"বিকাশ নম্বর: {bkash}\n\n"
-        "টাকা পাঠানোর পর ট্রানজেকশন আইডি সহ পুনরায় লিখবেন।",
-        chat_id
-    )
+    send_telegram_message(f"💸 দয়া করে আপনার জমা করার টাকার পরিমাণ লিখুন (শুধু সংখ্যা, যেমন: 100)\n\nবিকাশ নম্বর: {bkash}\n\nটাকা পাঠানোর পর ট্রানজেকশন আইডি সহ পুনরায় লিখবেন।", chat_id)
 
 def process_deposit_step(chat_id, text):
     if chat_id not in deposit_sessions:
         return False
-    # FIX 6: /start cancels
     if text.strip().lower() == "/start":
         deposit_sessions.pop(chat_id, None)
         send_telegram_message("❌ ডিপোজিট বাতিল করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
-
     session = deposit_sessions[chat_id]
     step = session["step"]
-
     if step == "amount":
         try:
             amount = float(text)
@@ -1094,36 +1030,16 @@ def process_deposit_step(chat_id, text):
             send_telegram_message("⚠️ ট্রানজেকশন আইডি খালি রাখা যাবে না।", chat_id)
             return True
         amount = session["amount"]
-        # FIX 14: Use uuid for unique deposit ID
         deposit_id = uuid.uuid4().hex[:10]
-        deposit = {
-            "id": deposit_id,
-            "user_id": chat_id,
-            "amount": amount,
-            "trxid": trxid,
-            "status": "pending",
-            "time": time.time()
-        }
+        deposit = {"id": deposit_id, "user_id": chat_id, "amount": amount, "trxid": trxid, "status": "pending", "time": time.time()}
         with data_lock:
             deposits.append(deposit)
             save_deposits()
         save_data_to_channel()
         deposit_sessions.pop(chat_id, None)
-        admin_msg = (
-            f"📥 নতুন ডিপোজিট রিকোয়েস্ট\n"
-            f"আইডি: {deposit_id}\n"
-            f"ইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\n"
-            f"পরিমাণ: {amount} টাকা\n"
-            f"ট্রানজেকশন আইডি: {trxid}\n"
-            f"অনুমোদন করতে: /approve {deposit_id}\n"
-            f"বাতিল করতে: /reject {deposit_id}"
-        )
+        admin_msg = f"📥 নতুন ডিপোজিট রিকোয়েস্ট\nআইডি: {deposit_id}\nইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\nপরিমাণ: {amount} টাকা\nট্রানজেকশন আইডি: {trxid}\nঅনুমোদন করতে: /approve {deposit_id}\nবাতিল করতে: /reject {deposit_id}"
         send_telegram_message(admin_msg, ADMIN_CHAT_ID)
-        send_telegram_message(
-            f"✅ আপনার {amount} টাকার ডিপোজিট রিকোয়েস্ট জমা হয়েছে।\n"
-            f"অ্যাডমিন অনুমোদন করলেই আপনার ব্যালেন্সে যোগ হবে।",
-            chat_id
-        )
+        send_telegram_message(f"✅ আপনার {amount} টাকার ডিপোজিট রিকোয়েস্ট জমা হয়েছে।\nঅ্যাডমিন অনুমোদন করলেই আপনার ব্যালেন্সে যোগ হবে।", chat_id)
         send_main_keyboard(chat_id)
         return True
     return False
@@ -1136,8 +1052,6 @@ def handle_buy(chat_id, quantity):
     except:
         send_telegram_message("❌ সঠিক সংখ্যা দিন। যেমন: 3", chat_id)
         return False
-
-    # FIX 8: Atomic transaction with rollback on delivery failure
     with data_lock:
         if qty > len(accounts):
             send_telegram_message(f"❌ পর্যাপ্ত অ্যাকাউন্ট নেই। বর্তমান স্টক: {len(accounts)}", chat_id)
@@ -1146,48 +1060,149 @@ def handle_buy(chat_id, quantity):
         total = qty * price
         user_balance = balances.get(str(chat_id), 0)
         if user_balance < total:
-            send_telegram_message(
-                f"❌ পর্যাপ্ত ব্যালেন্স নেই।\n"
-                f"প্রয়োজন: {total} টাকা\n"
-                f"আপনার ব্যালেন্স: {user_balance} টাকা\n"
-                f"দয়া করে প্রথমে ডিপোজিট করুন।",
-                chat_id
-            )
+            send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই।\nপ্রয়োজন: {total} টাকা\nআপনার ব্যালেন্স: {user_balance} টাকা\nদয়া করে প্রথমে ডিপোজিট করুন।", chat_id)
             return False
-
-        # Deduct balance and remove accounts
         bought = accounts[:qty]
         del accounts[:qty]
         balances[str(chat_id)] = user_balance - total
         save_accounts()
         save_balances()
-
-    # Try to deliver
     excel_bytes = generate_purchase_excel(bought)
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     if send_telegram_document(excel_bytes, filename, chat_id):
-        send_telegram_message(
-            f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\n"
-            f"অবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা",
-            chat_id
-        )
+        send_telegram_message(f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\nঅবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা", chat_id)
         admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
         send_telegram_message(admin_msg, ADMIN_CHAT_ID)
     else:
-        # Rollback
         with data_lock:
-            accounts[:0] = bought  # restore accounts
-            balances[str(chat_id)] = user_balance  # restore balance
+            accounts[:0] = bought
+            balances[str(chat_id)] = user_balance
             save_accounts()
             save_balances()
-        send_telegram_message(
-            "⚠️ অ্যাকাউন্ট ডেলিভারি ব্যর্থ হয়েছে। আপনার টাকা ফেরত দেওয়া হয়েছে এবং অ্যাকাউন্ট পুনরায় স্টকে যোগ করা হয়েছে। পরে আবার চেষ্টা করুন।",
-            chat_id
-        )
+        send_telegram_message("⚠️ অ্যাকাউন্ট ডেলিভারি ব্যর্থ হয়েছে। আপনার টাকা ফেরত দেওয়া হয়েছে এবং অ্যাকাউন্ট পুনরায় স্টকে যোগ করা হয়েছে। পরে আবার চেষ্টা করুন।", chat_id)
     save_data_to_channel()
     return True
 
-# ================== ADMIN MARKETPLACE COMMANDS (refactored into smaller handlers) ==================
+# ================== SELL ==================
+def start_sell(chat_id):
+    send_telegram_message("⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।", chat_id)
+    sell_sessions[chat_id] = {"step": "usernames"}
+    send_telegram_message("💰 বিক্রয় করুন\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।", chat_id)
+
+def process_sell_step(chat_id, text):
+    if chat_id not in sell_sessions:
+        return False
+    if text.strip().lower() == "/start":
+        del sell_sessions[chat_id]
+        send_telegram_message("❌ বিক্রয় প্রক্রিয়া বাতিল করা হয়েছে।", chat_id)
+        send_main_keyboard(chat_id)
+        return True
+    session = sell_sessions[chat_id]
+    step = session["step"]
+    if step == "usernames":
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
+            return True
+        session["usernames"] = lines
+        session["step"] = "passwords"
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}", chat_id)
+        return True
+    elif step == "passwords":
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        usernames = session["usernames"]
+        if len(lines) != len(usernames):
+            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।", chat_id)
+            return True
+        session["passwords"] = lines
+        session["step"] = "fa_keys"
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
+        return True
+    elif step == "fa_keys":
+        raw_lines = text.splitlines()
+        fa_list = [l.strip() for l in raw_lines]
+        usernames = session["usernames"]
+        while len(fa_list) > len(usernames) and fa_list and fa_list[-1] == '':
+            fa_list.pop()
+        if len(fa_list) != len(usernames):
+            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(fa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।", chat_id)
+            return True
+        accounts_list = []
+        for i in range(len(usernames)):
+            accounts_list.append({"username": usernames[i], "password": session["passwords"][i], "fa_key": fa_list[i]})
+        sell_id = uuid.uuid4().hex[:10]
+        sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time()}
+        with data_lock:
+            sell_requests.append(sell_req)
+            save_sell_requests()
+        save_data_to_channel()
+        del sell_sessions[chat_id]
+        send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।\nঅ্যাডমিন অ্যাপ্রুভ করলে আপনার ব্যালেন্সে টাকা যোগ হবে।", chat_id)
+        tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
+        excel_bytes = generate_sell_excel(accounts_list, tg_username)
+        filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nঅনুমোদন: /approvesell {sell_id} <amount>\nবাতিল: /rejectsell {sell_id}"
+        if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
+            send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>\nবাতিল: /rejectsell {sell_id}", ADMIN_CHAT_ID)
+        send_main_keyboard(chat_id)
+        return True
+    return False
+
+# ================== WITHDRAW ==================
+def start_withdraw(chat_id):
+    withdraw_sessions[chat_id] = {"step": "amount"}
+    send_telegram_message("💸 উইথড্র\n\nআপনার কত টাকা উত্তোলন করতে চান? (শুধু সংখ্যা লিখুন)\n/start দিয়ে বাতিল করুন।", chat_id)
+
+def process_withdraw_step(chat_id, text):
+    if chat_id not in withdraw_sessions:
+        return False
+    if text.strip().lower() == "/start":
+        del withdraw_sessions[chat_id]
+        send_telegram_message("❌ উইথড্র বাতিল করা হয়েছে।", chat_id)
+        send_main_keyboard(chat_id)
+        return True
+    session = withdraw_sessions[chat_id]
+    step = session["step"]
+    if step == "amount":
+        try:
+            amount = float(text)
+            if amount <= 0:
+                raise ValueError
+        except:
+            send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id)
+            return True
+        with data_lock:
+            bal = balances.get(str(chat_id), 0)
+        if amount > bal:
+            send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই। আপনার ব্যালেন্স: {bal} টাকা", chat_id)
+            send_main_keyboard(chat_id)
+            del withdraw_sessions[chat_id]
+            return True
+        session["amount"] = amount
+        session["step"] = "bkash"
+        send_telegram_message("📞 আপনার বিকাশ নম্বর দিন:", chat_id)
+        return True
+    elif step == "bkash":
+        bkash = text.strip()
+        if not bkash:
+            send_telegram_message("⚠️ বিকাশ নম্বর দিন।", chat_id)
+            return True
+        amount = session["amount"]
+        w_id = uuid.uuid4().hex[:10]
+        w_req = {"id": w_id, "user_id": chat_id, "amount": amount, "bkash": bkash, "status": "pending", "time": time.time()}
+        with data_lock:
+            withdraw_requests.append(w_req)
+            save_withdraw_requests()
+        save_data_to_channel()
+        del withdraw_sessions[chat_id]
+        send_telegram_message(f"✅ আপনার {amount} টাকা উত্তোলনের রিকোয়েস্ট জমা হয়েছে।\nআইডি: {w_id}\nঅ্যাডমিন অ্যাপ্রুভ করলে টাকা পাঠানো হবে।", chat_id)
+        admin_msg = f"💳 নতুন উইথড্র রিকোয়েস্ট\nআইডি: {w_id}\nইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\nপরিমাণ: {amount} টাকা\nবিকাশ: {bkash}\nঅনুমোদন: /approvewithdraw {w_id}\nবাতিল: /rejectwithdraw {w_id}"
+        send_telegram_message(admin_msg, ADMIN_CHAT_ID)
+        send_main_keyboard(chat_id)
+        return True
+    return False
+
+# ================== ADMIN MARKETPLACE COMMANDS ==================
 def admin_addstock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -1222,7 +1237,6 @@ def admin_deletestock_cmd(chat_id, arg):
         save_data_to_channel()
         send_telegram_message(f"✅ স্টক থেকে অ্যাকাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
     except ValueError:
-        # try username
         with data_lock:
             for i, acc in enumerate(accounts):
                 if acc["username"] == arg:
@@ -1237,7 +1251,6 @@ def admin_deletestock_cmd(chat_id, arg):
 def admin_bulkdelete_cmd(chat_id, parts):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
-    # FIX 9: Accept /bulkdelete <start_index> <count>
     if len(parts) < 3:
         send_telegram_message("❌ ফরম্যাট: /bulkdelete <শুরুর ইনডেক্স> <সংখ্যা> (যেমন /bulkdelete 1 5)", chat_id)
         return True
@@ -1389,7 +1402,121 @@ def admin_addbalance_cmd(chat_id, uid, amt_str):
         pass
     return True
 
-# Central admin command dispatcher (refactored)
+# ================== ADMIN SELL/WITHDRAW COMMANDS ==================
+def admin_approvesell_cmd(chat_id, sell_id, amount_str=None):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    try:
+        amount = float(amount_str) if amount_str else None
+    except:
+        send_telegram_message("❌ সঠিক পরিমাণ দিন।", chat_id)
+        return True
+    with data_lock:
+        for req in sell_requests:
+            if req["id"] == sell_id and req["status"] == "pending":
+                if amount is None:
+                    send_telegram_message("❌ অনুগ্রহ করে অনুমোদনের পরিমাণ উল্লেখ করুন। /approvesell <id> <amount>", chat_id)
+                    return True
+                req["status"] = "approved"
+                user = req["user_id"]
+                balances[str(user)] = balances.get(str(user), 0) + amount
+                save_balances()
+                save_sell_requests()
+                send_telegram_message(f"✅ সেল রিকোয়েস্ট {sell_id} অনুমোদিত। {amount} টাকা ইউজারের ব্যালেন্সে যোগ হয়েছে।", chat_id)
+                send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট অনুমোদিত হয়েছে। {amount} টাকা আপনার ব্যালেন্সে যোগ করা হয়েছে। বর্তমান ব্যালেন্স: {balances[str(user)]} টাকা", user)
+                break
+        else:
+            send_telegram_message("❌ রিকোয়েস্ট পাওয়া যায়নি বা ইতিমধ্যে প্রসেস করা হয়েছে।", chat_id)
+    save_data_to_channel()
+    return True
+
+def admin_rejectsell_cmd(chat_id, sell_id):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        for req in sell_requests:
+            if req["id"] == sell_id and req["status"] == "pending":
+                req["status"] = "rejected"
+                save_sell_requests()
+                send_telegram_message(f"❌ সেল রিকোয়েস্ট {sell_id} বাতিল করা হয়েছে।", chat_id)
+                send_telegram_message(f"❌ আপনার বিক্রয় রিকোয়েস্ট বাতিল করা হয়েছে।", req["user_id"])
+                break
+        else:
+            send_telegram_message("❌ রিকোয়েস্ট পাওয়া যায়নি।", chat_id)
+    save_data_to_channel()
+    return True
+
+def admin_approvewithdraw_cmd(chat_id, w_id):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        for req in withdraw_requests:
+            if req["id"] == w_id and req["status"] == "pending":
+                user = req["user_id"]
+                bal = balances.get(str(user), 0)
+                if bal < req["amount"]:
+                    send_telegram_message(f"❌ ইউজারের ব্যালেন্স {bal} টাকা, প্রয়োজন {req['amount']} টাকা।", chat_id)
+                    return True
+                req["status"] = "approved"
+                balances[str(user)] = bal - req["amount"]
+                save_balances()
+                save_withdraw_requests()
+                send_telegram_message(f"✅ উইথড্র {w_id} অনুমোদিত। ইউজারের {req['amount']} টাকা কেটে নেওয়া হয়েছে।", chat_id)
+                send_telegram_message(f"✅ আপনার {req['amount']} টাকার উইথড্র অনুমোদিত হয়েছে। অ্যাডমিন শীঘ্রই বিকাশে টাকা পাঠাবেন।", user)
+                break
+        else:
+            send_telegram_message("❌ রিকোয়েস্ট পাওয়া যায়নি।", chat_id)
+    save_data_to_channel()
+    return True
+
+def admin_rejectwithdraw_cmd(chat_id, w_id):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        for req in withdraw_requests:
+            if req["id"] == w_id and req["status"] == "pending":
+                req["status"] = "rejected"
+                save_withdraw_requests()
+                send_telegram_message(f"❌ উইথড্র {w_id} বাতিল করা হয়েছে।", chat_id)
+                send_telegram_message(f"❌ আপনার {req['amount']} টাকার উইথড্র বাতিল করা হয়েছে।", req["user_id"])
+                break
+        else:
+            send_telegram_message("❌ রিকোয়েস্ট পাওয়া যায়নি।", chat_id)
+    save_data_to_channel()
+    return True
+
+def admin_sell_requests_cmd(chat_id):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        pending = [r for r in sell_requests if r["status"] == "pending"]
+    if not pending:
+        send_telegram_message("কোনো পেন্ডিং সেল রিকোয়েস্ট নেই।", chat_id)
+    else:
+        lines = ["📊 পেন্ডিং সেল রিকোয়েস্ট:"]
+        for r in pending:
+            acc_names = ", ".join([a["username"] for a in r["accounts"]])
+            lines.append(f"আইডি: {r['id']} | ইউজার: {r['user_id']} | অ্যাকাউন্ট: {acc_names} | সংখ্যা: {len(r['accounts'])}")
+            lines.append(f"অনুমোদন: /approvesell {r['id']} <amount>\nবাতিল: /rejectsell {r['id']}\n")
+        send_telegram_message("\n".join(lines), chat_id)
+    return True
+
+def admin_withdraw_requests_cmd(chat_id):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        pending = [r for r in withdraw_requests if r["status"] == "pending"]
+    if not pending:
+        send_telegram_message("কোনো পেন্ডিং উইথড্র রিকোয়েস্ট নেই।", chat_id)
+    else:
+        lines = ["💳 পেন্ডিং উইথড্র রিকোয়েস্ট:"]
+        for r in pending:
+            lines.append(f"আইডি: {r['id']} | ইউজার: {r['user_id']} | পরিমাণ: {r['amount']} | বিকাশ: {r['bkash']}")
+            lines.append(f"অনুমোদন: /approvewithdraw {r['id']}\nবাতিল: /rejectwithdraw {r['id']}\n")
+        send_telegram_message("\n".join(lines), chat_id)
+    return True
+
+# ================== CENTRAL ADMIN DISPATCHER ==================
 def handle_market_admin(chat_id, text):
     parts = text.split()
     if not parts:
@@ -1443,6 +1570,26 @@ def handle_market_admin(chat_id, text):
             send_telegram_message("❌ ফরম্যাট: /addbalance <user_id> <amount>", chat_id)
             return True
         return admin_addbalance_cmd(chat_id, parts[1], parts[2])
+    elif cmd == "/approvesell":
+        if len(parts) < 3:
+            send_telegram_message("❌ ফরম্যাট: /approvesell <id> <amount>", chat_id)
+            return True
+        return admin_approvesell_cmd(chat_id, parts[1], parts[2])
+    elif cmd == "/rejectsell":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /rejectsell <id>", chat_id)
+            return True
+        return admin_rejectsell_cmd(chat_id, parts[1])
+    elif cmd == "/approvewithdraw":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /approvewithdraw <id>", chat_id)
+            return True
+        return admin_approvewithdraw_cmd(chat_id, parts[1])
+    elif cmd == "/rejectwithdraw":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /rejectwithdraw <id>", chat_id)
+            return True
+        return admin_rejectwithdraw_cmd(chat_id, parts[1])
     return False
 
 # ================== MAIN COMMAND HANDLER ==================
@@ -1461,14 +1608,11 @@ def handle_telegram_commands():
                     last_update_id = update["update_id"]
                     if "message" in update:
                         msg = update["message"]
-                        chat_id = str(msg["chat"]["id"])  # FIX 15: always string
+                        chat_id = str(msg["chat"]["id"])
                         text = msg.get("text", "").strip()
                         from_user = msg.get("from", {})
-                        sender_username = from_user.get("username") or \
-                                         from_user.get("first_name", f"ID:{chat_id}")
-
+                        sender_username = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         user_info[chat_id] = sender_username
-                        # Removed immediate save_user_info() to reduce I/O
 
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। পরে চেষ্টা করুন।", chat_id)
@@ -1514,6 +1658,14 @@ def handle_telegram_commands():
                             process_loss_recovery_step(chat_id, text)
                             continue
 
+                        if chat_id in sell_sessions:
+                            process_sell_step(chat_id, text)
+                            continue
+
+                        if chat_id in withdraw_sessions:
+                            process_withdraw_step(chat_id, text)
+                            continue
+
                         if chat_id in buy_sessions:
                             if text.strip().lower() in ["/cancel", "/start"]:
                                 buy_sessions.discard(chat_id)
@@ -1535,11 +1687,7 @@ def handle_telegram_commands():
                             continue
                         elif text == "📞 সাপোর্ট":
                             support_sessions.add(chat_id)
-                            send_telegram_message(
-                                "📞 আপনার সমস্যা বা প্রশ্ন লিখুন। অ্যাডমিন সরাসরি দেখতে পাবেন।\n"
-                                "বাতিল করতে /start বা /cancel লিখুন।",
-                                chat_id
-                            )
+                            send_telegram_message("📞 আপনার সমস্যা বা প্রশ্ন লিখুন। অ্যাডমিন সরাসরি দেখতে পাবেন।\nবাতিল করতে /start বা /cancel লিখুন।", chat_id)
                             continue
                         elif text == "🛑 স্টপ":
                             with data_lock:
@@ -1557,14 +1705,10 @@ def handle_telegram_commands():
                             start_deposit(chat_id)
                             continue
                         elif text == "🛒 একাউন্ট কিনুন":
+                            send_telegram_message("ইনস্টাগ্রাম কুকিজ এর কাজ যারা করেন আমাদের থেকে একাউন্ট কিনে কুকিজ সাবমিট দিলে যদি রিপোর্ট খারাপ হওয়ার কারণে আপনার লস হয় তবে আপনি লস রিকভারি অপশন থেকে আপনার যে পরিমাণ টাকা লস হবে তা ফেরত পাবেন।", chat_id)
                             buy_sessions.add(chat_id)
                             price = config.get("price_per_account", 1.70)
-                            send_telegram_message(
-                                f"🛒 কতটি অ্যাকাউন্ট কিনতে চান? (সংখ্যা লিখুন, বাতিল করতে /start বা /cancel)\n"
-                                f"প্রতি অ্যাকাউন্টের মূল্য: {price} টাকা\n"
-                                f"স্টক: {len(accounts)} টি",
-                                chat_id
-                            )
+                            send_telegram_message(f"🛒 কতটি অ্যাকাউন্ট কিনতে চান? (সংখ্যা লিখুন, বাতিল করতে /start বা /cancel)\nপ্রতি অ্যাকাউন্টের মূল্য: {price} টাকা\nস্টক: {len(accounts)} টি", chat_id)
                             continue
                         elif text == "📥 ডিপোজিট রিকোয়েস্ট":
                             if str(chat_id) != ADMIN_CHAT_ID:
@@ -1590,20 +1734,33 @@ def handle_telegram_commands():
                             if str(chat_id) != ADMIN_CHAT_ID:
                                 send_telegram_message("❌ অ্যাডমিন নন।", chat_id)
                             else:
-                                send_telegram_message(
-                                    "🗑️ স্টক ডিলিট করতে কমান্ড ব্যবহার করুন:\n"
-                                    "/deletestock <ইনডেক্স> বা /deletestock <ইউজারনেম>\n"
-                                    "একাধিক একসাথে ডিলিট: /bulkdelete <শুরুর ইনডেক্স> <সংখ্যা>\n"
-                                    "স্টক দেখতে /stock দিন।",
-                                    chat_id
-                                )
+                                send_telegram_message("🗑️ স্টক ডিলিট করতে কমান্ড ব্যবহার করুন:\n/deletestock <ইনডেক্স> বা /deletestock <ইউজারনেম>\nএকাধিক একসাথে ডিলিট: /bulkdelete <শুরুর ইনডেক্স> <সংখ্যা>\nস্টক দেখতে /stock দিন।", chat_id)
                             send_main_keyboard(chat_id)
                             continue
                         elif text == "🔄 লস রিকভারি":
                             start_loss_recovery(chat_id)
                             continue
+                        elif text == "💰 বিক্রয় করুন":
+                            start_sell(chat_id)
+                            continue
+                        elif text == "💸 উইথড্র":
+                            start_withdraw(chat_id)
+                            continue
+                        elif text == "📊 সেল requests":
+                            if str(chat_id) != ADMIN_CHAT_ID:
+                                send_telegram_message("❌ অ্যাডমিন নন।", chat_id)
+                            else:
+                                admin_sell_requests_cmd(chat_id)
+                            send_main_keyboard(chat_id)
+                            continue
+                        elif text == "💳 withdraw requests":
+                            if str(chat_id) != ADMIN_CHAT_ID:
+                                send_telegram_message("❌ অ্যাডমিন নন।", chat_id)
+                            else:
+                                admin_withdraw_requests_cmd(chat_id)
+                            send_main_keyboard(chat_id)
+                            continue
 
-                        # --- Text Commands ---
                         if text.startswith("/"):
                             if handle_market_admin(chat_id, text):
                                 continue
@@ -1612,8 +1769,7 @@ def handle_telegram_commands():
                                     subscribed_users.add(chat_id)
                                     save_subscribers()
                                 save_data_to_channel()
-                                reply = "✨ আমাদের বটে স্বাগতম! ✨"
-                                send_telegram_message(reply, chat_id, reply_markup=get_keyboard(chat_id), parse_mode="Markdown")
+                                send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_keyboard(chat_id))
                                 continue
                             elif text == "/stop":
                                 with data_lock:
@@ -1647,8 +1803,7 @@ def handle_telegram_commands():
                                 if len(text.split()) < 2:
                                     send_telegram_message("❌ ফরম্যাট: /broadcast <মেসেজ>", chat_id)
                                 else:
-                                    message = text.split(maxsplit=1)[1]
-                                    handle_admin_broadcast(chat_id, message)
+                                    handle_admin_broadcast(chat_id, text.split(maxsplit=1)[1])
                                 continue
                             elif text.startswith("/send"):
                                 parts = text.split(maxsplit=2)
@@ -1663,7 +1818,6 @@ def handle_telegram_commands():
                             else:
                                 send_telegram_message("❌ অজানা কমান্ড।", chat_id)
                                 continue
-
         except Exception as e:
             logger.exception("Telegram Command Error:")
         time.sleep(1)
@@ -1679,16 +1833,14 @@ if __name__ == "__main__":
     load_user_cooldowns()
     load_subscribers()
     load_market()
+    load_sell_requests()
+    load_withdraw_requests()
 
-    # Auto-restore from pinned compressed backup
     auto_restore_from_channel()
 
-    # Start bot polling thread
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
-    # Start auto backup thread
     threading.Thread(target=auto_backup_loop, daemon=True).start()
 
-    # Initial backup to channel (after full load)
     save_data_to_channel()
 
     port = int(os.environ.get("PORT", 10000))

@@ -476,6 +476,39 @@ def generate_purchase_excel(bought):
     output.seek(0)
     return output.read()
 
+def generate_sell_excel(accounts_list, telegram_username):
+    """Excel ফাইল তৈরি করে: Username, Password, 2FA Key, Telegram Username"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sell Request"
+    headers = ["Username", "Password", "2FA Key", "Telegram Username"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for acc in accounts_list:
+        ws.append([
+            acc["username"],
+            acc["password"],
+            acc.get("fa_key", ""),
+            telegram_username
+        ])
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = (max_length + 2) * 1.2
+        ws.column_dimensions[column].width = adjusted_width
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.read()
+
 # ================== SUBMISSION HANDLER ==================
 def start_submission(chat_id, sender_username):
     submission_sessions[chat_id] = {
@@ -1312,6 +1345,8 @@ def process_sell_step(chat_id, text):
         save_data_to_channel()
 
         del sell_sessions[chat_id]
+
+        # User confirmation
         send_telegram_message(
             f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\n"
             f"আইডি: {sell_id}\n"
@@ -1319,16 +1354,32 @@ def process_sell_step(chat_id, text):
             f"অ্যাডমিন অ্যাপ্রুভ করলে আপনার ব্যালেন্সে টাকা যোগ হবে।",
             chat_id
         )
-        admin_msg = (
+
+        # Generate Excel file and send to admin
+        # Get telegram username from user_info or use chat_id
+        tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
+        excel_bytes = generate_sell_excel(accounts_list, tg_username)
+        filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        caption = (
             f"📊 নতুন সেল রিকোয়েস্ট\n"
             f"আইডি: {sell_id}\n"
-            f"ইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\n"
+            f"ইউজার: {tg_username} (`{chat_id}`)\n"
             f"অ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\n"
-            f"ইউজারনেম: " + ", ".join([a['username'] for a in accounts_list]) + "\n"
             f"অনুমোদন: /approvesell {sell_id} <amount>\n"
             f"বাতিল: /rejectsell {sell_id}"
         )
-        send_telegram_message(admin_msg, ADMIN_CHAT_ID)
+        if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
+            # Fallback text message if document fails
+            fallback_text = (
+                f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\n"
+                f"আইডি: {sell_id}\n"
+                f"ইউজার: {tg_username} ({chat_id})\n"
+                f"অ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + "\n"
+                f"অনুমোদন: /approvesell {sell_id} <amount>\n"
+                f"বাতিল: /rejectsell {sell_id}"
+            )
+            send_telegram_message(fallback_text, ADMIN_CHAT_ID)
+
         send_main_keyboard(chat_id)
         return True
     return False

@@ -54,6 +54,7 @@ deposits = []
 config = {
     "bkash_number": "",
     "price_per_account": 1.70,
+    "sell_price_per_account": 1.0,
     "group_chat_id": "",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False
@@ -1086,8 +1087,12 @@ def handle_buy(chat_id, quantity):
 # ================== SELL ==================
 def start_sell(chat_id):
     send_telegram_message("⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।", chat_id)
+    sell_price = config.get("sell_price_per_account", 1.0)
     sell_sessions[chat_id] = {"step": "usernames"}
-    send_telegram_message("💰 বিক্রয় করুন\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।", chat_id)
+    send_telegram_message(
+        f"💰 বিক্রয় করুন\n\nপ্রতি অ্যাকাউন্টের মূল্য: {sell_price} টাকা\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
+        chat_id
+    )
 
 def process_sell_step(chat_id, text):
     if chat_id not in sell_sessions:
@@ -1137,13 +1142,15 @@ def process_sell_step(chat_id, text):
             save_sell_requests()
         save_data_to_channel()
         del sell_sessions[chat_id]
-        send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।\nঅ্যাডমিন অ্যাপ্রুভ করলে আপনার ব্যালেন্সে টাকা যোগ হবে।", chat_id)
+        sell_price = config.get("sell_price_per_account", 1.0)
+        total_expected = sell_price * len(accounts_list)
+        send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
         tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
         excel_bytes = generate_sell_excel(accounts_list, tg_username)
         filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nঅনুমোদন: /approvesell {sell_id} <amount>\nবাতিল: /rejectsell {sell_id}"
+        caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} (অটো মূল্য {total_expected}) বা /approvesell {sell_id} <amount>"
         if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
-            send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>\nবাতিল: /rejectsell {sell_id}", ADMIN_CHAT_ID)
+            send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>", ADMIN_CHAT_ID)
         send_main_keyboard(chat_id)
         return True
     return False
@@ -1288,7 +1295,24 @@ def admin_setprice_cmd(chat_id, price_str):
         config["price_per_account"] = price
         save_config()
     save_data_to_channel()
-    send_telegram_message(f"✅ প্রতি অ্যাকাউন্টের মূল্য {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
+    send_telegram_message(f"✅ প্রতি অ্যাকাউন্টের মূল্য (ক্রয়) {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
+    return True
+
+def admin_setsellprice_cmd(chat_id, price_str):
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    try:
+        price = float(price_str)
+        if price <= 0:
+            raise ValueError
+    except:
+        send_telegram_message("❌ সঠিক মূল্য দিন (সংখ্যা)।", chat_id)
+        return True
+    with data_lock:
+        config["sell_price_per_account"] = price
+        save_config()
+    save_data_to_channel()
+    send_telegram_message(f"✅ বিক্রয়ের প্রতি অ্যাকাউন্টের মূল্য {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
     return True
 
 def admin_setbkash_cmd(chat_id, number):
@@ -1402,21 +1426,22 @@ def admin_addbalance_cmd(chat_id, uid, amt_str):
         pass
     return True
 
-# ================== ADMIN SELL/WITHDRAW COMMANDS ==================
+# ================== ADMIN SELL/WITHDRAW COMMANDS (UPDATED) ==================
 def admin_approvesell_cmd(chat_id, sell_id, amount_str=None):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
-    try:
-        amount = float(amount_str) if amount_str else None
-    except:
-        send_telegram_message("❌ সঠিক পরিমাণ দিন।", chat_id)
-        return True
     with data_lock:
         for req in sell_requests:
             if req["id"] == sell_id and req["status"] == "pending":
-                if amount is None:
-                    send_telegram_message("❌ অনুগ্রহ করে অনুমোদনের পরিমাণ উল্লেখ করুন। /approvesell <id> <amount>", chat_id)
-                    return True
+                if amount_str is None:
+                    price = config.get("sell_price_per_account", 1.0)
+                    amount = price * len(req["accounts"])
+                else:
+                    try:
+                        amount = float(amount_str)
+                    except:
+                        send_telegram_message("❌ সঠিক পরিমাণ দিন।", chat_id)
+                        return True
                 req["status"] = "approved"
                 user = req["user_id"]
                 balances[str(user)] = balances.get(str(user), 0) + amount
@@ -1497,7 +1522,8 @@ def admin_sell_requests_cmd(chat_id):
         for r in pending:
             acc_names = ", ".join([a["username"] for a in r["accounts"]])
             lines.append(f"আইডি: {r['id']} | ইউজার: {r['user_id']} | অ্যাকাউন্ট: {acc_names} | সংখ্যা: {len(r['accounts'])}")
-            lines.append(f"অনুমোদন: /approvesell {r['id']} <amount>\nবাতিল: /rejectsell {r['id']}\n")
+            lines.append(f"অনুমোদন: /approvesell {r['id']} (অথবা /approvesell {r['id']} <amount>)")
+            lines.append(f"বাতিল: /rejectsell {r['id']}\n")
         send_telegram_message("\n".join(lines), chat_id)
     return True
 
@@ -1538,6 +1564,11 @@ def handle_market_admin(chat_id, text):
             send_telegram_message("❌ ফরম্যাট: /setprice <মূল্য>", chat_id)
             return True
         return admin_setprice_cmd(chat_id, parts[1])
+    elif cmd == "/setsellprice":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /setsellprice <মূল্য>", chat_id)
+            return True
+        return admin_setsellprice_cmd(chat_id, parts[1])
     elif cmd == "/setbkash":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /setbkash <বিকাশ নম্বর>", chat_id)
@@ -1571,10 +1602,12 @@ def handle_market_admin(chat_id, text):
             return True
         return admin_addbalance_cmd(chat_id, parts[1], parts[2])
     elif cmd == "/approvesell":
-        if len(parts) < 3:
-            send_telegram_message("❌ ফরম্যাট: /approvesell <id> <amount>", chat_id)
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /approvesell <id> [amount]", chat_id)
             return True
-        return admin_approvesell_cmd(chat_id, parts[1], parts[2])
+        sell_id = parts[1]
+        amount_str = parts[2] if len(parts) > 2 else None
+        return admin_approvesell_cmd(chat_id, sell_id, amount_str)
     elif cmd == "/rejectsell":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /rejectsell <id>", chat_id)

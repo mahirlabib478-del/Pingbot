@@ -1775,8 +1775,7 @@ def handle_telegram_commands():
                             if chat_id in add_stock_sessions:
                                 del add_stock_sessions[chat_id]
                                 send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
-                        elif data_cb == "test_cb":
-                            send_telegram_message("✅ কলব্যাক কাজ করছে! ইনলাইন বাটন ঠিকমতো কাজ করছে।", chat_id)
+                        
                         continue
 
                     if "message" in update:
@@ -1975,9 +1974,7 @@ def handle_telegram_commands():
                                     save_subscribers()
                                 save_data_to_channel()
                                 send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_main_keyboard(chat_id))
-                                # Test callback button
-                                test_kb = {"inline_keyboard": [[{"text": "🔍 কলব্যাক টেস্ট", "callback_data": "test_cb"}]]}
-                                send_telegram_message("ইনলাইন বাটন টেস্ট করতে এখানে চাপুন:", chat_id, reply_markup=test_kb)
+                                
                                 continue
                             elif text == "/stop":
                                 with data_lock:

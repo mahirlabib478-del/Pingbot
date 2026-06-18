@@ -1731,6 +1731,7 @@ def handle_telegram_commands():
                         from_user = cb.get("from", {})
                         sender_username = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         user_info[chat_id] = sender_username
+                        logger.info(f"Received callback: {data_cb} from {chat_id}")
                         answer_callback_query(cbid)
                         if data_cb == "buy_2fa":
                             start_buy_session(chat_id, "2fa")
@@ -1774,6 +1775,8 @@ def handle_telegram_commands():
                             if chat_id in add_stock_sessions:
                                 del add_stock_sessions[chat_id]
                                 send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "test_cb":
+                            send_telegram_message("✅ কলব্যাক কাজ করছে! ইনলাইন বাটন ঠিকমতো কাজ করছে।", chat_id)
                         continue
 
                     if "message" in update:
@@ -1972,6 +1975,9 @@ def handle_telegram_commands():
                                     save_subscribers()
                                 save_data_to_channel()
                                 send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_main_keyboard(chat_id))
+                                # Test callback button
+                                test_kb = {"inline_keyboard": [[{"text": "🔍 কলব্যাক টেস্ট", "callback_data": "test_cb"}]]}
+                                send_telegram_message("ইনলাইন বাটন টেস্ট করতে এখানে চাপুন:", chat_id, reply_markup=test_kb)
                                 continue
                             elif text == "/stop":
                                 with data_lock:
@@ -2029,6 +2035,17 @@ def handle_telegram_commands():
 def home():
     return "Bot Running Successfully!"
 
+# ================== WEBHOOK CLEANUP ==================
+def ensure_polling():
+    try:
+        resp = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
+        if resp.json().get("ok"):
+            logger.info("Webhook deleted, polling mode active.")
+        else:
+            logger.warning("Webhook deletion may have failed.")
+    except Exception as e:
+        logger.error(f"Failed to delete webhook: {e}")
+
 # ================== MAIN ==================
 if __name__ == "__main__":
     load_mother_accounts()
@@ -2037,6 +2054,8 @@ if __name__ == "__main__":
     load_market()
     load_sell_requests()
     load_withdraw_requests()
+
+    ensure_polling()  # Delete webhook before starting polling
 
     auto_restore_from_channel()
 

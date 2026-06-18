@@ -48,22 +48,24 @@ submission_sessions = {}
 support_sessions = set()
 maintenance_mode = False
 
-accounts = []
+accounts = []                # each account now has "type": "2fa_on"/"normal"
 balances = {}
 deposits = []
 config = {
     "bkash_number": "",
-    "price_per_account": 1.70,
-    "sell_price_per_account": 1.0,
+    "price_2fa_on": 2.2,
+    "price_normal": 1.2,
+    "sell_price_2fa_on": 1.8,
+    "sell_price_normal": 0.8,
     "group_chat_id": "",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False
 }
 deposit_sessions = {}
-buy_sessions = set()
-add_stock_sessions = {}
+buy_sessions = {}            # now a dict: {chat_id: {"step":"choose_type"/"quantity", "type":...}}
+add_stock_sessions = {}      # now includes type
 loss_recovery_sessions = {}
-sell_sessions = {}
+sell_sessions = {}           # now a dict with step "choose_type" then normal steps
 sell_requests = []
 withdraw_requests = []
 withdraw_sessions = {}
@@ -140,6 +142,10 @@ def load_market():
     try:
         with open(ACCOUNTS_FILE, "r") as f:
             accounts = json.load(f)
+            # ensure backward compatibility: if no "type", assume "2fa_on"
+            for acc in accounts:
+                if "type" not in acc:
+                    acc["type"] = "2fa_on"
     except (FileNotFoundError, json.JSONDecodeError):
         accounts = []
     try:
@@ -159,6 +165,11 @@ def load_market():
                 if key not in loaded_config:
                     loaded_config[key] = value
             config = loaded_config
+            # backwards compat: if old price_per_account exists, set price_2fa_on
+            if "price_per_account" in config and "price_2fa_on" not in config:
+                config["price_2fa_on"] = config["price_per_account"]
+            if "sell_price_per_account" in config and "sell_price_2fa_on" not in config:
+                config["sell_price_2fa_on"] = config["sell_price_per_account"]
             CHANNEL_ID = int(config.get("channel_id", "0")) if config.get("channel_id") else None
             maintenance_mode = config.get("maintenance_mode", False)
     except (FileNotFoundError, json.JSONDecodeError):
@@ -204,6 +215,9 @@ def load_sell_requests():
     try:
         with open(SELL_REQUESTS_FILE, "r") as f:
             sell_requests = json.load(f)
+            for req in sell_requests:
+                if "type" not in req:
+                    req["type"] = "2fa_on"
     except (FileNotFoundError, json.JSONDecodeError):
         sell_requests = []
 
@@ -380,12 +394,14 @@ def auto_backup_loop():
 def get_keyboard(chat_id):
     keyboard = [
         ["💰 ব্যালেন্স", "💸 ডিপোজিট"],
-        ["🛒 একাউন্ট কিনুন", "💰 বিক্রয় করুন"],
+        ["🛒 একাউন্ট কিনুন", "💰 বিক্রয় করুন"],   # rename later in code? button text stays as is? We'll change button text to "একাউন্ট বিক্রয় করুন" later, but here we use it. Actually we need to change the button text. I'll change it later.
         ["💸 উইথড্র"],
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
         ["📞 সাপোর্ট", "🛑 স্টপ"],
         ["🔄 লস রিকভারি"]
     ]
+    # change button text for sell to "একাউন্ট বিক্রয় করুন"
+    keyboard[1][1] = "একাউন্ট বিক্রয় করুন"
     if str(chat_id) == ADMIN_CHAT_ID:
         keyboard.append(["📥 ডিপোজিট রিকোয়েস্ট", "➕ স্টক যোগ করুন"])
         keyboard.append(["📦 স্টক দেখুন", "🗑️ স্টক ডিলিট"])
@@ -460,17 +476,17 @@ def generate_purchase_excel(bought):
     output.seek(0)
     return output.read()
 
-def generate_sell_excel(accounts_list, telegram_username):
+def generate_sell_excel(accounts_list, telegram_username, acc_type):
     wb = Workbook()
     ws = wb.active
     ws.title = "Sell Request"
-    headers = ["Username", "Password", "2FA Key", "Telegram Username"]
+    headers = ["Username", "Password", "2FA Key", "Telegram Username", "Type"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
     for acc in accounts_list:
-        ws.append([acc["username"], acc["password"], acc.get("fa_key", ""), telegram_username])
+        ws.append([acc["username"], acc["password"], acc.get("fa_key", ""), telegram_username, acc_type])
     for col in ws.columns:
         max_length = 0
         column = col[0].column_letter
@@ -898,12 +914,18 @@ def _perform_restore(file_id):
         mother_accounts = backup.get("mother_accounts", [])
         user_last_request = backup.get("user_cooldowns", {})
         accounts = backup.get("market_accounts", backup.get("accounts", []))
+        for acc in accounts:
+            if "type" not in acc:
+                acc["type"] = "2fa_on"
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
         config = backup.get("config", {})
         CHANNEL_ID = int(config.get("channel_id", "0")) if config.get("channel_id") else None
         maintenance_mode = config.get("maintenance_mode", False)
         sell_requests = backup.get("sell_requests", [])
+        for req in sell_requests:
+            if "type" not in req:
+                req["type"] = "2fa_on"
         withdraw_requests = backup.get("withdraw_requests", [])
         save_all()
     logger.info("Restore completed successfully")
@@ -932,13 +954,13 @@ def auto_restore_from_channel():
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
 
-# ================== ADMIN ADD STOCK FLOW ==================
+# ================== ADMIN ADD STOCK FLOW (now includes type) ==================
 def start_add_stock(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return
-    add_stock_sessions[chat_id] = {"step": "usernames"}
+    add_stock_sessions[chat_id] = {"step": "choose_type"}
     send_telegram_message(
-        "➕ স্টক যোগ করুন\n\nপ্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
+        "➕ স্টক যোগ করুন\n\nপ্রথমে একাউন্টের ধরণ বাছাই করুন:\n1️⃣ 2FA ON একাউন্ট\n2️⃣ Normal একাউন্ট\n\nনম্বর লিখুন (1 বা 2) অথবা /start দিয়ে বাতিল করুন।",
         chat_id
     )
 
@@ -952,7 +974,22 @@ def process_add_stock_step(chat_id, text):
         return True
     session = add_stock_sessions[chat_id]
     step = session["step"]
-    if step == "usernames":
+    if step == "choose_type":
+        choice = text.strip()
+        if choice == "1":
+            session["account_type"] = "2fa_on"
+            session["step"] = "usernames"
+            send_telegram_message("আপনি 2FA ON একাউন্ট বাছাই করেছেন।\n\nএখন **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।", chat_id)
+            return True
+        elif choice == "2":
+            session["account_type"] = "normal"
+            session["step"] = "usernames"
+            send_telegram_message("আপনি Normal একাউন্ট বাছাই করেছেন।\n\nএখন **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।", chat_id)
+            return True
+        else:
+            send_telegram_message("⚠️ ভুল নির্বাচন। 1 বা 2 লিখুন। /start দিয়ে বাতিল করুন।", chat_id)
+            return True
+    elif step == "usernames":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
@@ -980,14 +1017,24 @@ def process_add_stock_step(chat_id, text):
         if len(fa_list) != len(usernames):
             send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(fa_list)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি লাইন (খালিও হতে পারে) দিন।", chat_id)
             return True
+        acc_type = session["account_type"]
         count = len(usernames)
         with data_lock:
             for i in range(count):
-                accounts.append({"username": usernames[i], "password": session["passwords"][i], "fa_key": fa_list[i]})
+                accounts.append({
+                    "username": usernames[i],
+                    "password": session["passwords"][i],
+                    "fa_key": fa_list[i],
+                    "type": acc_type
+                })
             save_accounts()
         save_data_to_channel()
         del add_stock_sessions[chat_id]
-        send_telegram_message(f"✅ {count} টি অ্যাকাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
+        # broadcast to all users
+        type_display = "2FA ON" if acc_type == "2fa_on" else "Normal"
+        price = config["price_2fa_on"] if acc_type == "2fa_on" else config["price_normal"]
+        broadcast_message(f"📢 নতুন একাউন্ট স্টক যোগ হয়েছে:\nধরণ: {type_display} একাউন্ট\nসংখ্যা: {count} টি\nপ্রতি একাউন্ট মূল্য (ক্রয়): {price} টাকা")
+        send_telegram_message(f"✅ {count} টি {type_display} একাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
     return False
@@ -1045,38 +1092,43 @@ def process_deposit_step(chat_id, text):
         return True
     return False
 
-def handle_buy(chat_id, quantity):
+def handle_buy(chat_id, quantity_str, account_type):
     try:
-        qty = int(quantity)
+        qty = int(quantity_str)
         if qty <= 0:
             raise ValueError
     except:
         send_telegram_message("❌ সঠিক সংখ্যা দিন। যেমন: 3", chat_id)
         return False
     with data_lock:
-        if qty > len(accounts):
-            send_telegram_message(f"❌ পর্যাপ্ত অ্যাকাউন্ট নেই। বর্তমান স্টক: {len(accounts)}", chat_id)
+        # filter accounts by type
+        available = [a for a in accounts if a["type"] == account_type]
+        if qty > len(available):
+            send_telegram_message(f"❌ পর্যাপ্ত {account_type} একাউন্ট নেই। বর্তমান স্টক: {len(available)}", chat_id)
             return False
-        price = config.get("price_per_account", 1.70)
+        price = config["price_2fa_on"] if account_type == "2fa_on" else config["price_normal"]
         total = qty * price
         user_balance = balances.get(str(chat_id), 0)
         if user_balance < total:
             send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই।\nপ্রয়োজন: {total} টাকা\nআপনার ব্যালেন্স: {user_balance} টাকা\nদয়া করে প্রথমে ডিপোজিট করুন।", chat_id)
             return False
-        bought = accounts[:qty]
-        del accounts[:qty]
+        bought = available[:qty]
+        # remove from accounts (need to pop by indices)
+        for acc in bought:
+            accounts.remove(acc)  # works as identity
         balances[str(chat_id)] = user_balance - total
         save_accounts()
         save_balances()
     excel_bytes = generate_purchase_excel(bought)
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     if send_telegram_document(excel_bytes, filename, chat_id):
-        send_telegram_message(f"✅ {qty} টি অ্যাকাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\nঅবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা", chat_id)
-        admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি অ্যাকাউন্ট কিনেছে। মোট: {total} টাকা।"
+        send_telegram_message(f"✅ {qty} টি {account_type} একাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\nঅবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা", chat_id)
+        admin_msg = f"🛒 {user_info.get(chat_id, chat_id)} ({chat_id}) {qty} টি {account_type} একাউন্ট কিনেছে। মোট: {total} টাকা।"
         send_telegram_message(admin_msg, ADMIN_CHAT_ID)
     else:
+        # rollback
         with data_lock:
-            accounts[:0] = bought
+            accounts.extend(bought)
             balances[str(chat_id)] = user_balance
             save_accounts()
             save_balances()
@@ -1086,11 +1138,9 @@ def handle_buy(chat_id, quantity):
 
 # ================== SELL ==================
 def start_sell(chat_id):
-    send_telegram_message("⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।", chat_id)
-    sell_price = config.get("sell_price_per_account", 1.0)
-    sell_sessions[chat_id] = {"step": "usernames"}
+    sell_sessions[chat_id] = {"step": "choose_type"}
     send_telegram_message(
-        f"💰 বিক্রয় করুন\n\nপ্রতি অ্যাকাউন্টের মূল্য: {sell_price} টাকা\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
+        "💰 একাউন্ট বিক্রয় করুন\n\nপ্রথমে একাউন্টের ধরণ বাছাই করুন:\n1️⃣ 2FA ON একাউন্ট\n2️⃣ Normal একাউন্ট\n\nনম্বর লিখুন (1 বা 2) অথবা /start দিয়ে বাতিল করুন।",
         chat_id
     )
 
@@ -1104,7 +1154,40 @@ def process_sell_step(chat_id, text):
         return True
     session = sell_sessions[chat_id]
     step = session["step"]
-    if step == "usernames":
+    if step == "choose_type":
+        choice = text.strip()
+        if choice == "1":
+            session["account_type"] = "2fa_on"
+            session["step"] = "warning"
+            send_telegram_message(
+                "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।\n\nচালিয়ে যেতে 1 লিখুন, বাতিল করতে /start।",
+                chat_id
+            )
+            return True
+        elif choice == "2":
+            session["account_type"] = "normal"
+            session["step"] = "warning"
+            send_telegram_message(
+                "⚠️ সতর্কতা:\n\nNormal একাউন্ট এর ক্ষেত্রে লস রিকভারি অপশন ব্যবহার করলে লস হওয়া টাকার ৫০% আপনার সেল এমাউন্ট থেকে কাটা হবে।\n\nচালিয়ে যেতে 1 লিখুন, বাতিল করতে /start।",
+                chat_id
+            )
+            return True
+        else:
+            send_telegram_message("⚠️ ভুল নির্বাচন। 1 বা 2 লিখুন। /start দিয়ে বাতিল করুন।", chat_id)
+            return True
+    elif step == "warning":
+        if text.strip() == "1":
+            session["step"] = "usernames"
+            sell_price = config["sell_price_2fa_on"] if session["account_type"] == "2fa_on" else config["sell_price_normal"]
+            send_telegram_message(
+                f"প্রতি অ্যাকাউন্টের মূল্য: {sell_price} টাকা\n\nআপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start দিয়ে বাতিল করুন।",
+                chat_id
+            )
+            return True
+        else:
+            send_telegram_message("চালিয়ে যেতে 1 লিখুন অথবা /start।", chat_id)
+            return True
+    elif step == "usernames":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
@@ -1136,21 +1219,29 @@ def process_sell_step(chat_id, text):
         for i in range(len(usernames)):
             accounts_list.append({"username": usernames[i], "password": session["passwords"][i], "fa_key": fa_list[i]})
         sell_id = uuid.uuid4().hex[:10]
-        sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time()}
+        acc_type = session["account_type"]
+        sell_req = {
+            "id": sell_id,
+            "user_id": chat_id,
+            "accounts": accounts_list,
+            "status": "pending",
+            "time": time.time(),
+            "type": acc_type
+        }
         with data_lock:
             sell_requests.append(sell_req)
             save_sell_requests()
         save_data_to_channel()
         del sell_sessions[chat_id]
-        sell_price = config.get("sell_price_per_account", 1.0)
+        sell_price = config["sell_price_2fa_on"] if acc_type == "2fa_on" else config["sell_price_normal"]
         total_expected = sell_price * len(accounts_list)
-        send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
+        send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nধরণ: {acc_type}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
         tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
-        excel_bytes = generate_sell_excel(accounts_list, tg_username)
+        excel_bytes = generate_sell_excel(accounts_list, tg_username, acc_type)
         filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} (অটো মূল্য {total_expected}) বা /approvesell {sell_id} <amount>"
+        caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nধরণ: {acc_type}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} (অটো মূল্য {total_expected}) বা /approvesell {sell_id} <amount>"
         if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
-            send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>", ADMIN_CHAT_ID)
+            send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nধরণ: {acc_type}\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>", ADMIN_CHAT_ID)
         send_main_keyboard(chat_id)
         return True
     return False
@@ -1225,7 +1316,8 @@ def admin_stock_cmd(chat_id):
         else:
             lines = [f"📦 স্টক ({len(accounts)} টি):"]
             for i, acc in enumerate(accounts, 1):
-                lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key', 'N/A')}")
+                type_display = "2FA ON" if acc["type"] == "2fa_on" else "Normal"
+                lines.append(f"{i}. [{type_display}] ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key', 'N/A')}")
             send_telegram_message("\n".join(lines), chat_id)
     return True
 
@@ -1281,7 +1373,7 @@ def admin_bulkdelete_cmd(chat_id, parts):
     send_telegram_message(f"✅ ইনডেক্স {start+1} থেকে {count} টি অ্যাকাউন্ট ডিলিট করা হয়েছে:\n" + "\n".join(usernames), chat_id)
     return True
 
-def admin_setprice_cmd(chat_id, price_str):
+def admin_setprice_cmd(chat_id, price_str, price_type):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
     try:
@@ -1292,27 +1384,23 @@ def admin_setprice_cmd(chat_id, price_str):
         send_telegram_message("❌ সঠিক মূল্য দিন (সংখ্যা)।", chat_id)
         return True
     with data_lock:
-        config["price_per_account"] = price
+        if price_type == "buy_2fa":
+            config["price_2fa_on"] = price
+            msg = f"✅ 2FA ON একাউন্ট ক্রয় মূল্য {price} টাকা নির্ধারণ করা হয়েছে।"
+        elif price_type == "buy_normal":
+            config["price_normal"] = price
+            msg = f"✅ Normal একাউন্ট ক্রয় মূল্য {price} টাকা নির্ধারণ করা হয়েছে।"
+        elif price_type == "sell_2fa":
+            config["sell_price_2fa_on"] = price
+            msg = f"✅ 2FA ON একাউন্ট বিক্রয় মূল্য {price} টাকা নির্ধারণ করা হয়েছে।"
+        elif price_type == "sell_normal":
+            config["sell_price_normal"] = price
+            msg = f"✅ Normal একাউন্ট বিক্রয় মূল্য {price} টাকা নির্ধারণ করা হয়েছে।"
+        else:
+            return False
         save_config()
     save_data_to_channel()
-    send_telegram_message(f"✅ প্রতি অ্যাকাউন্টের মূল্য (ক্রয়) {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
-    return True
-
-def admin_setsellprice_cmd(chat_id, price_str):
-    if str(chat_id) != ADMIN_CHAT_ID:
-        return False
-    try:
-        price = float(price_str)
-        if price <= 0:
-            raise ValueError
-    except:
-        send_telegram_message("❌ সঠিক মূল্য দিন (সংখ্যা)।", chat_id)
-        return True
-    with data_lock:
-        config["sell_price_per_account"] = price
-        save_config()
-    save_data_to_channel()
-    send_telegram_message(f"✅ বিক্রয়ের প্রতি অ্যাকাউন্টের মূল্য {price} টাকা নির্ধারণ করা হয়েছে।", chat_id)
+    send_telegram_message(msg, chat_id)
     return True
 
 def admin_setbkash_cmd(chat_id, number):
@@ -1426,15 +1514,16 @@ def admin_addbalance_cmd(chat_id, uid, amt_str):
         pass
     return True
 
-# ================== ADMIN SELL/WITHDRAW COMMANDS (UPDATED) ==================
+# ================== ADMIN SELL/WITHDRAW COMMANDS ==================
 def admin_approvesell_cmd(chat_id, sell_id, amount_str=None):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
     with data_lock:
         for req in sell_requests:
             if req["id"] == sell_id and req["status"] == "pending":
+                acc_type = req.get("type", "2fa_on")
                 if amount_str is None:
-                    price = config.get("sell_price_per_account", 1.0)
+                    price = config["sell_price_2fa_on"] if acc_type == "2fa_on" else config["sell_price_normal"]
                     amount = price * len(req["accounts"])
                 else:
                     try:
@@ -1521,7 +1610,8 @@ def admin_sell_requests_cmd(chat_id):
         lines = ["📊 পেন্ডিং সেল রিকোয়েস্ট:"]
         for r in pending:
             acc_names = ", ".join([a["username"] for a in r["accounts"]])
-            lines.append(f"আইডি: {r['id']} | ইউজার: {r['user_id']} | অ্যাকাউন্ট: {acc_names} | সংখ্যা: {len(r['accounts'])}")
+            acc_type = r.get("type", "2fa_on")
+            lines.append(f"আইডি: {r['id']} | ইউজার: {r['user_id']} | ধরণ: {acc_type} | অ্যাকাউন্ট: {acc_names} | সংখ্যা: {len(r['accounts'])}")
             lines.append(f"অনুমোদন: /approvesell {r['id']} (অথবা /approvesell {r['id']} <amount>)")
             lines.append(f"বাতিল: /rejectsell {r['id']}\n")
         send_telegram_message("\n".join(lines), chat_id)
@@ -1559,16 +1649,27 @@ def handle_market_admin(chat_id, text):
         return admin_deletestock_cmd(chat_id, parts[1])
     elif cmd == "/bulkdelete":
         return admin_bulkdelete_cmd(chat_id, parts)
-    elif cmd == "/setprice":
+    # new price commands
+    elif cmd == "/setbuyprice2fa":
         if len(parts) < 2:
-            send_telegram_message("❌ ফরম্যাট: /setprice <মূল্য>", chat_id)
+            send_telegram_message("❌ ফরম্যাট: /setbuyprice2fa <মূল্য>", chat_id)
             return True
-        return admin_setprice_cmd(chat_id, parts[1])
-    elif cmd == "/setsellprice":
+        return admin_setprice_cmd(chat_id, parts[1], "buy_2fa")
+    elif cmd == "/setbuypricenormal":
         if len(parts) < 2:
-            send_telegram_message("❌ ফরম্যাট: /setsellprice <মূল্য>", chat_id)
+            send_telegram_message("❌ ফরম্যাট: /setbuypricenormal <মূল্য>", chat_id)
             return True
-        return admin_setsellprice_cmd(chat_id, parts[1])
+        return admin_setprice_cmd(chat_id, parts[1], "buy_normal")
+    elif cmd == "/setsellprice2fa":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /setsellprice2fa <মূল্য>", chat_id)
+            return True
+        return admin_setprice_cmd(chat_id, parts[1], "sell_2fa")
+    elif cmd == "/setsellpricenormal":
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /setsellpricenormal <মূল্য>", chat_id)
+            return True
+        return admin_setprice_cmd(chat_id, parts[1], "sell_normal")
     elif cmd == "/setbkash":
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /setbkash <বিকাশ নম্বর>", chat_id)
@@ -1699,16 +1800,48 @@ def handle_telegram_commands():
                             process_withdraw_step(chat_id, text)
                             continue
 
+                        # buy session handling (now dict with steps)
                         if chat_id in buy_sessions:
+                            session = buy_sessions[chat_id]
                             if text.strip().lower() in ["/cancel", "/start"]:
-                                buy_sessions.discard(chat_id)
+                                del buy_sessions[chat_id]
                                 send_telegram_message("❌ কেনা বাতিল করা হয়েছে।", chat_id)
                                 send_main_keyboard(chat_id)
                                 continue
-                            success = handle_buy(chat_id, text)
-                            if success:
-                                buy_sessions.discard(chat_id)
-                                send_main_keyboard(chat_id)
+                            if session["step"] == "choose_type":
+                                choice = text.strip()
+                                if choice == "1":
+                                    session["account_type"] = "2fa_on"
+                                    session["step"] = "warning"
+                                    send_telegram_message(
+                                        "ইনস্টাগ্রাম কুকিজ এর কাজ যারা করেন আমাদের থেকে একাউন্ট কিনে কুকিজ সাবমিট দিলে যদি রিপোর্ট খারাপ হওয়ার কারণে আপনার লস হয় তবে আপনি লস রিকভারি অপশন থেকে আপনার যে পরিমাণ টাকা লস হবে তা ফেরত পাবেন।\n\nচালিয়ে যেতে 1 লিখুন, বাতিল করতে /start বা /cancel।",
+                                        chat_id
+                                    )
+                                elif choice == "2":
+                                    session["account_type"] = "normal"
+                                    session["step"] = "warning"
+                                    send_telegram_message(
+                                        "Normal একাউন্ট এর ক্ষেত্রে লস রিকভারি অপশন ব্যবহার করলে লস হওয়া টাকার ৫০% ফেরত দেয়া হবে।\n\nচালিয়ে যেতে 1 লিখুন, বাতিল করতে /start বা /cancel।",
+                                        chat_id
+                                    )
+                                else:
+                                    send_telegram_message("⚠️ ভুল নির্বাচন। 1 বা 2 লিখুন। /start দিয়ে বাতিল করুন।", chat_id)
+                                continue
+                            elif session["step"] == "warning":
+                                if text.strip() == "1":
+                                    session["step"] = "quantity"
+                                    price = config["price_2fa_on"] if session["account_type"] == "2fa_on" else config["price_normal"]
+                                    available = len([a for a in accounts if a["type"] == session["account_type"]])
+                                    send_telegram_message(f"🛒 কতটি একাউন্ট কিনতে চান? (সংখ্যা লিখুন)\nপ্রতি একাউন্টের মূল্য: {price} টাকা\nস্টক: {available} টি", chat_id)
+                                else:
+                                    send_telegram_message("চালিয়ে যেতে 1 লিখুন অথবা /start বাতিল করুন।", chat_id)
+                                continue
+                            elif session["step"] == "quantity":
+                                success = handle_buy(chat_id, text, session["account_type"])
+                                if success:
+                                    del buy_sessions[chat_id]
+                                    send_main_keyboard(chat_id)
+                                # else stay in session
                             continue
 
                         # --- Button Handlers ---
@@ -1738,10 +1871,11 @@ def handle_telegram_commands():
                             start_deposit(chat_id)
                             continue
                         elif text == "🛒 একাউন্ট কিনুন":
-                            send_telegram_message("ইনস্টাগ্রাম কুকিজ এর কাজ যারা করেন আমাদের থেকে একাউন্ট কিনে কুকিজ সাবমিট দিলে যদি রিপোর্ট খারাপ হওয়ার কারণে আপনার লস হয় তবে আপনি লস রিকভারি অপশন থেকে আপনার যে পরিমাণ টাকা লস হবে তা ফেরত পাবেন।", chat_id)
-                            buy_sessions.add(chat_id)
-                            price = config.get("price_per_account", 1.70)
-                            send_telegram_message(f"🛒 কতটি অ্যাকাউন্ট কিনতে চান? (সংখ্যা লিখুন, বাতিল করতে /start বা /cancel)\nপ্রতি অ্যাকাউন্টের মূল্য: {price} টাকা\nস্টক: {len(accounts)} টি", chat_id)
+                            buy_sessions[chat_id] = {"step": "choose_type"}
+                            send_telegram_message(
+                                "একাউন্ট কিনুন\n\nঅনুগ্রহ করে একাউন্টের ধরণ নির্বাচন করুন:\n1️⃣ 2FA ON একাউন্ট\n2️⃣ Normal একাউন্ট\n\nনম্বর লিখুন (1 বা 2) অথবা /start দিয়ে বাতিল করুন।",
+                                chat_id
+                            )
                             continue
                         elif text == "📥 ডিপোজিট রিকোয়েস্ট":
                             if str(chat_id) != ADMIN_CHAT_ID:
@@ -1773,7 +1907,7 @@ def handle_telegram_commands():
                         elif text == "🔄 লস রিকভারি":
                             start_loss_recovery(chat_id)
                             continue
-                        elif text == "💰 বিক্রয় করুন":
+                        elif text == "একাউন্ট বিক্রয় করুন":
                             start_sell(chat_id)
                             continue
                         elif text == "💸 উইথড্র":
@@ -1839,11 +1973,11 @@ def handle_telegram_commands():
                                     handle_admin_broadcast(chat_id, text.split(maxsplit=1)[1])
                                 continue
                             elif text.startswith("/send"):
-                                parts = text.split(maxsplit=2)
-                                if len(parts) < 3:
+                                parts_cmd = text.split(maxsplit=2)
+                                if len(parts_cmd) < 3:
                                     send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
                                 else:
-                                    handle_admin_send(chat_id, parts[1], parts[2])
+                                    handle_admin_send(chat_id, parts_cmd[1], parts_cmd[2])
                                 continue
                             elif text == "/backup":
                                 handle_backup(chat_id)

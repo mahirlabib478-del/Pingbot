@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8808046131:AAHCgB22O9KtwtIKrfXpMOBrPZRzNvN-3oo"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "YourBotUsername")  # বটের ইউজারনেম এখানে বসান
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set")
@@ -35,6 +36,8 @@ DEPOSITS_FILE = "deposits.json"
 CONFIG_FILE = "config.json"
 SELL_REQUESTS_FILE = "sell_requests.json"
 WITHDRAW_REQUESTS_FILE = "withdraw_requests.json"
+REFERRALS_FILE = "referrals.json"
+REFERRAL_BONUSES_FILE = "referral_bonuses.json"
 
 app = Flask(__name__)
 
@@ -70,6 +73,9 @@ sell_requests = []
 withdraw_requests = []
 withdraw_sessions = {}
 last_backup_message_id = None
+
+referrals = {}              # invitee_id -> referrer_id
+referral_bonuses = {}       # referrer_id -> total_bonus_earned
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -245,6 +251,38 @@ def save_withdraw_requests():
         except IOError as e:
             logger.error(f"Withdraw requests save error: {e}")
 
+def load_referrals():
+    global referrals
+    try:
+        with open(REFERRALS_FILE, "r") as f:
+            referrals = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        referrals = {}
+
+def save_referrals():
+    with data_lock:
+        try:
+            with open(REFERRALS_FILE, "w") as f:
+                json.dump(referrals, f, indent=2)
+        except IOError as e:
+            logger.error(f"Referrals save error: {e}")
+
+def load_referral_bonuses():
+    global referral_bonuses
+    try:
+        with open(REFERRAL_BONUSES_FILE, "r") as f:
+            referral_bonuses = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        referral_bonuses = {}
+
+def save_referral_bonuses():
+    with data_lock:
+        try:
+            with open(REFERRAL_BONUSES_FILE, "w") as f:
+                json.dump(referral_bonuses, f, indent=2)
+        except IOError as e:
+            logger.error(f"Referral bonuses save error: {e}")
+
 def save_all():
     save_accounts()
     save_balances()
@@ -256,6 +294,8 @@ def save_all():
     save_user_cooldowns()
     save_sell_requests()
     save_withdraw_requests()
+    save_referrals()
+    save_referral_bonuses()
     save_data_to_channel()
 
 # ================== TELEGRAM HELPERS ==================
@@ -360,6 +400,8 @@ def save_data_to_channel():
                     "user_cooldowns": user_last_request,
                     "sell_requests": sell_requests,
                     "withdraw_requests": withdraw_requests,
+                    "referrals": referrals,
+                    "referral_bonuses": referral_bonuses,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -408,7 +450,8 @@ def get_main_keyboard(chat_id):
         ["💸 উইথড্র"],
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
         ["📞 সাপোর্ট", "🛑 স্টপ"],
-        ["🔄 লস রিকভারি"]
+        ["🔄 লস রিকভারি"],
+        ["👥 রেফারেল"]  # রেফারেল বাটন যোগ করা হলো
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         keyboard.append(["📥 ডিপোজিট রিকোয়েস্ট", "➕ স্টক যোগ করুন"])
@@ -522,8 +565,48 @@ def generate_sell_excel(accounts_list, telegram_username):
     output.seek(0)
     return output.read()
 
+# ================== REFERRAL SYSTEM ==================
+def get_referral_link(chat_id):
+    ref_code = f"ref_{chat_id}"
+    return f"https://t.me/{BOT_USERNAME}?start={ref_code}"
+
+def handle_referral_command(chat_id):
+    link = get_referral_link(chat_id)
+    with data_lock:
+        total_referrals = sum(1 for ref in referrals.values() if ref == str(chat_id))
+        bonus = referral_bonuses.get(str(chat_id), 0.0)
+    msg = (
+        "👥 আপনার রেফারেল তথ্য:\n\n"
+        f"🔗 রেফারেল লিংক:\n{link}\n\n"
+        f"📊 মোট রেফার করা ইউজার: {total_referrals} জন\n"
+        f"💰 রেফারেল বোনাস প্রাপ্তি: {bonus} টাকা\n\n"
+        "বন্ধুদের এই লিংকটি শেয়ার করুন, তারা বটে জয়েন করে অ্যাকাউন্ট বিক্রি করলে আপনি ৪০% বোনাস পাবেন!"
+    )
+    send_telegram_message(msg, chat_id)
+
+def process_referral_on_start(chat_id, text):
+    """ এক্সট্রাক্ট রেফার কোড এবং সেট করে """
+    if not text or " " not in text:
+        return
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return
+    ref_code = parts[1].strip()
+    if ref_code.startswith("ref_"):
+        ref_id = ref_code[4:]
+        if ref_id.isdigit() and ref_id != str(chat_id):  # নিজের রেফারেল নয়
+            with data_lock:
+                if str(chat_id) not in referrals:  # ইতিমধ্যে রেফারেল থাকলে পরিবর্তন নয়
+                    referrals[str(chat_id)] = ref_id
+                    save_referrals()
+                    # রেফারকারীকে নোটিফাই
+                    ref_name = user_info.get(ref_id, f"ID:{ref_id}")
+                    send_telegram_message(
+                        f"🎉 আপনি একটি নতুন রেফারেল পেয়েছেন!\nইউজার: {user_info.get(str(chat_id), chat_id)} জয়েন করেছে।",
+                        ref_id
+                    )
+
 # ================== SUBMISSION HANDLER ==================
-# (unchanged)
 def start_submission(chat_id, sender_username):
     submission_sessions[chat_id] = {"step": "username", "data": {}, "username": sender_username}
     msg = ("📋 দয়া করে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n\n"
@@ -595,7 +678,6 @@ def process_submission_step(chat_id, text, sender_username):
     return False
 
 # ================== LOSS RECOVERY HANDLER ==================
-# (unchanged)
 def start_loss_recovery(chat_id):
     loss_recovery_sessions[chat_id] = {"step": "usernames", "data": {}}
     msg = ("⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
@@ -704,7 +786,6 @@ def handle_loss_recovery_file(chat_id, message):
     send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
 # ================== MOTHER ACCOUNT ==================
-# (unchanged)
 def handle_addmother(chat_id, args):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -865,7 +946,7 @@ def handle_admin_send(chat_id, target_id, message):
     send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{message}", target_id)
     send_telegram_message(f"✅ {target_id} কে মেসেজ পাঠানো হয়েছে।", chat_id)
 
-# ================== BACKUP & RESTORE (with config fix) ==================
+# ================== BACKUP & RESTORE ==================
 def handle_backup(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -883,6 +964,8 @@ def handle_backup(chat_id):
             "config": config,
             "sell_requests": sell_requests,
             "withdraw_requests": withdraw_requests,
+            "referrals": referrals,
+            "referral_bonuses": referral_bonuses,
             "timestamp": datetime.datetime.now().isoformat()
         }
     backup_json = json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')
@@ -928,7 +1011,7 @@ def _perform_restore(file_id):
     with data_lock:
         global subscribed_users, user_info, mother_accounts, user_last_request
         global accounts, balances, deposits, config, CHANNEL_ID, maintenance_mode
-        global sell_requests, withdraw_requests
+        global sell_requests, withdraw_requests, referrals, referral_bonuses
         subscribed_users = set(backup.get("subscribed_users", []))
         user_info = backup.get("user_info", {})
         mother_accounts = backup.get("mother_accounts", [])
@@ -942,7 +1025,6 @@ def _perform_restore(file_id):
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
 
-        # Config merge fix
         default_config = {
             "bkash_number": "",
             "price_2fa_buy": 2.2,
@@ -961,6 +1043,8 @@ def _perform_restore(file_id):
         maintenance_mode = config.get("maintenance_mode", False)
         sell_requests = backup.get("sell_requests", [])
         withdraw_requests = backup.get("withdraw_requests", [])
+        referrals = backup.get("referrals", {})
+        referral_bonuses = backup.get("referral_bonuses", {})
         save_all()
     logger.info("Restore completed successfully")
     return True
@@ -988,7 +1072,7 @@ def auto_restore_from_channel():
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
 
-# ================== ADMIN ADD STOCK FLOW (updated for normal reuse_link) ==================
+# ================== ADMIN ADD STOCK FLOW ==================
 def start_add_stock(chat_id, acc_type):
     if str(chat_id) != ADMIN_CHAT_ID:
         return
@@ -1030,12 +1114,10 @@ def process_add_stock_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            # Normal account: ask for email reuse links
             session["step"] = "reuse_links"
             send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
         return True
     elif step == "reuse_links":
-        # Normal account reuse links
         raw_lines = text.splitlines()
         reuse_links = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
@@ -1090,7 +1172,6 @@ def process_add_stock_step(chat_id, text):
     return False
 
 # ================== MARKETPLACE: DEPOSIT ==================
-# (unchanged)
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "")
@@ -1145,7 +1226,7 @@ def process_deposit_step(chat_id, text):
         return True
     return False
 
-# ================== MARKETPLACE: BUY (reuse_link in Excel) ==================
+# ================== MARKETPLACE: BUY ==================
 def start_buy_session(chat_id, acc_type):
     buy_sessions[chat_id] = {"step": "quantity", "type": acc_type}
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
@@ -1215,7 +1296,7 @@ def handle_buy(chat_id, text):
         balances[str(chat_id)] = user_balance - total
         save_accounts()
         save_balances()
-    excel_bytes = generate_purchase_excel(to_buy)  # now includes reuse_link
+    excel_bytes = generate_purchase_excel(to_buy)
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     if send_telegram_document(excel_bytes, filename, chat_id):
         send_telegram_message(f"✅ {qty} টি একাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\nঅবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা", chat_id)
@@ -1233,7 +1314,7 @@ def handle_buy(chat_id, text):
     send_main_keyboard(chat_id)
     return True
 
-# ================== SELL (updated with reuse_link for normal) ==================
+# ================== SELL ==================
 def start_sell_session(chat_id, acc_type):
     sell_sessions[chat_id] = {"step": "usernames", "type": acc_type}
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
@@ -1244,7 +1325,6 @@ def start_sell_session(chat_id, acc_type):
     else:
         warning = "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে তাদের যতগুলা আইডি ব্যাক আসবে সেই পরিমাণ টাকা আপনার সেল একাউন্ট হতে মাইনাস করা হবে।"
         send_telegram_message(warning, chat_id)
-        # Extra notice for normal accounts about email reuse link
         extra_notice = (
             "📌 Normal একাউন্ট বিক্রির বিশেষ নির্দেশনা:\n\n"
             "Tmailor.com থেকে মেইল নিয়ে প্রতিটি মাদার অ্যাকাউন্টে মেইল অ্যাড করবেন এবং reuse link সংরক্ষণ করবেন। "
@@ -1290,12 +1370,10 @@ def process_sell_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            # Normal: ask for reuse links
             session["step"] = "reuse_links"
             send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
         return True
     elif step == "reuse_links":
-        # Normal sell: process reuse links
         raw_lines = text.splitlines()
         reuse_links = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
@@ -1322,14 +1400,13 @@ def process_sell_step(chat_id, text):
         total_expected = config["price_normal_sell"] * len(accounts_list)
         send_telegram_message(f"✅ আপনার Normal একাউন্ট বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
         tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
-        excel_bytes = generate_sell_excel(accounts_list, tg_username)  # now includes reuse_link
+        excel_bytes = generate_sell_excel(accounts_list, tg_username)
         filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         caption = f"📊 নতুন Normal সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} {total_expected}\nবাতিল: /rejectsell {sell_id}"
         send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption)
         send_main_keyboard(chat_id)
         return True
     elif step == "fa_keys":
-        # 2FA sell (unchanged)
         raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
@@ -1344,7 +1421,7 @@ def process_sell_step(chat_id, text):
                 "username": usernames[i],
                 "password": session["passwords"][i],
                 "fa_key": fa_list[i],
-                "reuse_link": ""   # 2FA accounts don't have reuse link
+                "reuse_link": ""
             })
         sell_id = uuid.uuid4().hex[:10]
         sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time(), "type": "2fa"}
@@ -1364,7 +1441,7 @@ def process_sell_step(chat_id, text):
         return True
     return False
 
-# ================== WITHDRAW (unchanged) ==================
+# ================== WITHDRAW ==================
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
     msg = "💸 উইথড্র\n\nআপনার কত টাকা উত্তোলন করতে চান? (শুধু সংখ্যা লিখুন)\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।"
@@ -1420,7 +1497,7 @@ def process_withdraw_step(chat_id, text):
         return True
     return False
 
-# ================== ADMIN MARKETPLACE COMMANDS (unchanged except stock list) ==================
+# ================== ADMIN MARKETPLACE COMMANDS ==================
 def admin_stock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -1623,6 +1700,26 @@ def admin_approvesell_cmd(chat_id, sell_id, amount_str=None):
                 save_sell_requests()
                 send_telegram_message(f"✅ সেল রিকোয়েস্ট {sell_id} অনুমোদিত। {amount} টাকা ইউজারের ব্যালেন্সে যোগ হয়েছে।", chat_id)
                 send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট অনুমোদিত হয়েছে। {amount} টাকা আপনার ব্যালেন্সে যোগ করা হয়েছে। বর্তমান ব্যালেন্স: {balances[str(user)]} টাকা", user)
+
+                # ========== রেফারেল বোনাস ==========
+                invitee_id = str(user)
+                if invitee_id in referrals:
+                    referrer = referrals[invitee_id]
+                    bonus = amount * 0.4  # 40%
+                    if bonus > 0:
+                        balances[referrer] = balances.get(referrer, 0) + bonus
+                        referral_bonuses[referrer] = referral_bonuses.get(referrer, 0.0) + bonus
+                        save_balances()
+                        save_referral_bonuses()
+                        send_telegram_message(
+                            f"🎉 রেফারেল বোনাস! আপনার রেফার করা ইউজার একটি সেল থেকে {amount} টাকা ইনকাম করেছে। আপনি পেয়েছেন {bonus} টাকা (40%)।\nবর্তমান ব্যালেন্স: {balances[referrer]} টাকা",
+                            referrer
+                        )
+                        send_telegram_message(
+                            f"ℹ️ রেফারেল বোনাস: রেফারকারী {referrer} কে {bonus} টাকা দেওয়া হয়েছে।",
+                            ADMIN_CHAT_ID
+                        )
+                # ========== রেফারেল শেষ ==========
                 break
         else:
             send_telegram_message("❌ রিকোয়েস্ট পাওয়া যায়নি বা ইতিমধ্যে প্রসেস করা হয়েছে।", chat_id)
@@ -1877,7 +1974,6 @@ def handle_telegram_commands():
                                 handle_restore(chat_id, file_id)
                             continue
 
-                        # Smart Cancel
                         cancel_keywords = ["cancel", "/cancel", "/start"]
                         if text.strip().lower() in cancel_keywords:
                             cancelled = False
@@ -1904,7 +2000,6 @@ def handle_telegram_commands():
                                 send_main_keyboard(chat_id)
                                 continue
 
-                        # Active sessions
                         if chat_id in support_sessions:
                             forward = f"📩 সাপোর্ট মেসেজ\nইউজার: {sender_username} ({chat_id})\n\n{text}"
                             send_telegram_message(forward, ADMIN_CHAT_ID)
@@ -2038,6 +2133,9 @@ def handle_telegram_commands():
                                 admin_withdraw_requests_cmd(chat_id)
                             send_main_keyboard(chat_id)
                             continue
+                        elif text == "👥 রেফারেল":
+                            handle_referral_command(chat_id)
+                            continue
 
                         if text.startswith("/"):
                             if handle_market_admin(chat_id, text):
@@ -2046,6 +2144,7 @@ def handle_telegram_commands():
                                 with data_lock:
                                     subscribed_users.add(chat_id)
                                     save_subscribers()
+                                process_referral_on_start(chat_id, text)  # রেফারেল প্রক্রিয়া
                                 save_data_to_channel()
                                 send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_main_keyboard(chat_id))
                                 continue
@@ -2093,6 +2192,9 @@ def handle_telegram_commands():
                             elif text == "/backup":
                                 handle_backup(chat_id)
                                 continue
+                            elif text == "/referral":
+                                handle_referral_command(chat_id)
+                                continue
                             else:
                                 send_telegram_message("❌ অজানা কমান্ড।", chat_id)
                                 continue
@@ -2124,6 +2226,8 @@ if __name__ == "__main__":
     load_market()
     load_sell_requests()
     load_withdraw_requests()
+    load_referrals()
+    load_referral_bonuses()
 
     ensure_polling()
 

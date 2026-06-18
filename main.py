@@ -927,7 +927,23 @@ def _perform_restore(file_id):
                 acc['type'] = '2fa'
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
-        config = backup.get("config", {})
+
+        # ===== FIX: Config merge with default keys =====
+        default_config = {
+            "bkash_number": "",
+            "price_2fa_buy": 2.2,
+            "price_normal_buy": 1.2,
+            "price_2fa_sell": 1.8,
+            "price_normal_sell": 0.8,
+            "group_chat_id": "",
+            "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
+            "maintenance_mode": False
+        }
+        restored_config = backup.get("config", {})
+        default_config.update(restored_config)   # পুরনো ব্যাকআপের মান প্রাধান্য পাবে
+        config = default_config
+        # ===============================================
+
         CHANNEL_ID = int(config.get("channel_id", "0")) if config.get("channel_id") else None
         maintenance_mode = config.get("maintenance_mode", False)
         sell_requests = backup.get("sell_requests", [])

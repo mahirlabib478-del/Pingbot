@@ -48,7 +48,7 @@ submission_sessions = {}
 support_sessions = set()
 maintenance_mode = False
 
-accounts = []               # each dict contains 'type' field ('2fa' or 'normal')
+accounts = []               # each dict contains 'type', 'reuse_link' (for normal)
 balances = {}
 deposits = []
 config = {
@@ -62,10 +62,10 @@ config = {
     "maintenance_mode": False
 }
 deposit_sessions = {}
-buy_sessions = {}           # chat_id -> {"step": "quantity", "type": "2fa"|"normal"}
+buy_sessions = {}
 add_stock_sessions = {}
 loss_recovery_sessions = {}
-sell_sessions = {}          # chat_id -> {"step": ..., "type": "2fa"|"normal"}
+sell_sessions = {}
 sell_requests = []
 withdraw_requests = []
 withdraw_sessions = {}
@@ -76,7 +76,6 @@ backup_lock = threading.Lock()
 
 # ================== HELPER: BENGALI NUMBER CONVERTER ==================
 def normalize_bengali_number(text):
-    """Convert Bengali numerals (০-৯) to ASCII digits."""
     bengali_digits = "০১২৩৪৫৬৭৮৯"
     english_digits = "0123456789"
     trans_table = str.maketrans(bengali_digits, english_digits)
@@ -150,10 +149,11 @@ def load_market():
     try:
         with open(ACCOUNTS_FILE, "r") as f:
             accounts = json.load(f)
-            # Migration: add 'type' field if missing
             for acc in accounts:
                 if 'type' not in acc:
                     acc['type'] = '2fa'
+                if 'reuse_link' not in acc:
+                    acc['reuse_link'] = ''
     except (FileNotFoundError, json.JSONDecodeError):
         accounts = []
     try:
@@ -342,7 +342,6 @@ def answer_callback_query(callback_id, text=None):
         logger.error(f"Callback answer error: {e}")
 
 # ================== CHANNEL BACKUP ==================
-# (unchanged, same as before)
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID:
@@ -423,7 +422,7 @@ def remove_keyboard():
 def send_main_keyboard(chat_id, text="\u200b"):
     send_telegram_message(text, chat_id, reply_markup=get_main_keyboard(chat_id))
 
-# ================== EXCEL GENERATORS (unchanged) ==================
+# ================== EXCEL GENERATORS (updated for reuse_link) ==================
 def generate_submission_excel(usernames, passwords, twofa_list, bkash, telegram_username):
     wb = Workbook()
     ws = wb.active
@@ -462,13 +461,18 @@ def generate_purchase_excel(bought):
     wb = Workbook()
     ws = wb.active
     ws.title = "Purchased Accounts"
-    headers = ["Username", "Password", "2FA Key"]
+    headers = ["Username", "Password", "2FA Key", "Email Reuse Link"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
     for acc in bought:
-        ws.append([acc["username"], acc["password"], acc.get("fa_key", "")])
+        ws.append([
+            acc["username"],
+            acc["password"],
+            acc.get("fa_key", ""),
+            acc.get("reuse_link", "")
+        ])
     for col in ws.columns:
         max_length = 0
         column = col[0].column_letter
@@ -489,13 +493,19 @@ def generate_sell_excel(accounts_list, telegram_username):
     wb = Workbook()
     ws = wb.active
     ws.title = "Sell Request"
-    headers = ["Username", "Password", "2FA Key", "Telegram Username"]
+    headers = ["Username", "Password", "2FA Key", "Email Reuse Link", "Telegram Username"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
     for acc in accounts_list:
-        ws.append([acc["username"], acc["password"], acc.get("fa_key", ""), telegram_username])
+        ws.append([
+            acc["username"],
+            acc["password"],
+            acc.get("fa_key", ""),
+            acc.get("reuse_link", ""),
+            telegram_username
+        ])
     for col in ws.columns:
         max_length = 0
         column = col[0].column_letter
@@ -513,6 +523,7 @@ def generate_sell_excel(accounts_list, telegram_username):
     return output.read()
 
 # ================== SUBMISSION HANDLER ==================
+# (unchanged)
 def start_submission(chat_id, sender_username):
     submission_sessions[chat_id] = {"step": "username", "data": {}, "username": sender_username}
     msg = ("📋 দয়া করে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n\n"
@@ -584,6 +595,7 @@ def process_submission_step(chat_id, text, sender_username):
     return False
 
 # ================== LOSS RECOVERY HANDLER ==================
+# (unchanged)
 def start_loss_recovery(chat_id):
     loss_recovery_sessions[chat_id] = {"step": "usernames", "data": {}}
     msg = ("⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
@@ -853,7 +865,7 @@ def handle_admin_send(chat_id, target_id, message):
     send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{message}", target_id)
     send_telegram_message(f"✅ {target_id} কে মেসেজ পাঠানো হয়েছে।", chat_id)
 
-# ================== BACKUP & RESTORE ==================
+# ================== BACKUP & RESTORE (with config fix) ==================
 def handle_backup(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -925,10 +937,12 @@ def _perform_restore(file_id):
         for acc in accounts:
             if 'type' not in acc:
                 acc['type'] = '2fa'
+            if 'reuse_link' not in acc:
+                acc['reuse_link'] = ''
         balances = backup.get("balances", {})
         deposits = backup.get("deposits", [])
 
-        # ===== FIX: Config merge with default keys =====
+        # Config merge fix
         default_config = {
             "bkash_number": "",
             "price_2fa_buy": 2.2,
@@ -940,9 +954,8 @@ def _perform_restore(file_id):
             "maintenance_mode": False
         }
         restored_config = backup.get("config", {})
-        default_config.update(restored_config)   # পুরনো ব্যাকআপের মান প্রাধান্য পাবে
+        default_config.update(restored_config)
         config = default_config
-        # ===============================================
 
         CHANNEL_ID = int(config.get("channel_id", "0")) if config.get("channel_id") else None
         maintenance_mode = config.get("maintenance_mode", False)
@@ -975,7 +988,7 @@ def auto_restore_from_channel():
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
 
-# ================== ADMIN ADD STOCK FLOW ==================
+# ================== ADMIN ADD STOCK FLOW (updated for normal reuse_link) ==================
 def start_add_stock(chat_id, acc_type):
     if str(chat_id) != ADMIN_CHAT_ID:
         return
@@ -1017,21 +1030,36 @@ def process_add_stock_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            count = len(usernames)
-            with data_lock:
-                for i in range(count):
-                    accounts.append({
-                        "username": usernames[i],
-                        "password": session["passwords"][i],
-                        "fa_key": "",
-                        "type": "normal"
-                    })
-                save_accounts()
-            save_data_to_channel()
-            del add_stock_sessions[chat_id]
-            broadcast_message(f"📢 নতুন স্টক যোগ করা হয়েছে: {count} টি Normal একাউন্ট।")
-            send_telegram_message(f"✅ {count} টি Normal একাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
-            send_main_keyboard(chat_id)
+            # Normal account: ask for email reuse links
+            session["step"] = "reuse_links"
+            send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
+        return True
+    elif step == "reuse_links":
+        # Normal account reuse links
+        raw_lines = text.splitlines()
+        reuse_links = [l.strip() for l in raw_lines]
+        usernames = session["usernames"]
+        while len(reuse_links) > len(usernames) and reuse_links and reuse_links[-1] == '':
+            reuse_links.pop()
+        if len(reuse_links) != len(usernames):
+            send_telegram_message(f"❌ ইমেইল রিইউজ লিংক সংখ্যা ({len(reuse_links)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে লিংক দিন।", chat_id)
+            return True
+        count = len(usernames)
+        with data_lock:
+            for i in range(count):
+                accounts.append({
+                    "username": usernames[i],
+                    "password": session["passwords"][i],
+                    "fa_key": "",
+                    "type": "normal",
+                    "reuse_link": reuse_links[i]
+                })
+            save_accounts()
+        save_data_to_channel()
+        del add_stock_sessions[chat_id]
+        broadcast_message(f"📢 নতুন স্টক যোগ করা হয়েছে: {count} টি Normal একাউন্ট।")
+        send_telegram_message(f"✅ {count} টি Normal একাউন্ট স্টকে যোগ করা হয়েছে (reuse link সহ)।", chat_id)
+        send_main_keyboard(chat_id)
         return True
     elif step == "fa_keys":
         raw_lines = text.splitlines()
@@ -1049,7 +1077,8 @@ def process_add_stock_step(chat_id, text):
                     "username": usernames[i],
                     "password": session["passwords"][i],
                     "fa_key": fa_list[i],
-                    "type": "2fa"
+                    "type": "2fa",
+                    "reuse_link": ""
                 })
             save_accounts()
         save_data_to_channel()
@@ -1061,6 +1090,7 @@ def process_add_stock_step(chat_id, text):
     return False
 
 # ================== MARKETPLACE: DEPOSIT ==================
+# (unchanged)
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "")
@@ -1115,7 +1145,7 @@ def process_deposit_step(chat_id, text):
         return True
     return False
 
-# ================== MARKETPLACE: BUY ==================
+# ================== MARKETPLACE: BUY (reuse_link in Excel) ==================
 def start_buy_session(chat_id, acc_type):
     buy_sessions[chat_id] = {"step": "quantity", "type": acc_type}
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
@@ -1132,7 +1162,8 @@ def start_buy_session(chat_id, acc_type):
             "📄 Normal একাউন্টের ক্ষেত্রে:\n"
             "ইনস্টাগ্রাম কুকিজ সাবমিটে রিপোর্ট খারাপ হওয়ার কারণে যত টাকা লস হবে, "
             "তার ৫০% টাকা লস রিকভারি অপশনের মাধ্যমে ফেরত পাবেন।\n"
-            "Normal একাউন্টে কোনো 2FA কী থাকে না।"
+            "Normal একাউন্টে কোনো 2FA কী থাকে না।\n"
+            "এক্সেল ফাইলে ইমেইল রিইউজ লিংক দেওয়া থাকবে।"
         )
     msg = (f"🛒 {type_label}\n\n{warning}\n\n"
            f"কতটি একাউন্ট কিনতে চান? (সংখ্যা লিখুন)\n"
@@ -1184,7 +1215,7 @@ def handle_buy(chat_id, text):
         balances[str(chat_id)] = user_balance - total
         save_accounts()
         save_balances()
-    excel_bytes = generate_purchase_excel(to_buy)
+    excel_bytes = generate_purchase_excel(to_buy)  # now includes reuse_link
     filename = f"purchased_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     if send_telegram_document(excel_bytes, filename, chat_id):
         send_telegram_message(f"✅ {qty} টি একাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা।\nঅবশিষ্ট ব্যালেন্স: {balances[str(chat_id)]} টাকা", chat_id)
@@ -1202,16 +1233,26 @@ def handle_buy(chat_id, text):
     send_main_keyboard(chat_id)
     return True
 
-# ================== SELL ==================
+# ================== SELL (updated with reuse_link for normal) ==================
 def start_sell_session(chat_id, acc_type):
     sell_sessions[chat_id] = {"step": "usernames", "type": acc_type}
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
     price = config["price_2fa_sell"] if acc_type == "2fa" else config["price_normal_sell"]
     if acc_type == "2fa":
         warning = "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।"
+        send_telegram_message(warning, chat_id)
     else:
         warning = "⚠️ সতর্কতা:\n\nNormal একাউন্টের ক্ষেত্রে লস রিকভারি করা হলে লসের ৫০% আপনার সেল এমাউন্ট থেকে কাটা হবে।"
-    send_telegram_message(warning, chat_id)
+        send_telegram_message(warning, chat_id)
+        # Extra notice for normal accounts about email reuse link
+        extra_notice = (
+            "📌 Normal একাউন্ট বিক্রির বিশেষ নির্দেশনা:\n\n"
+            "Tmailor.com থেকে মেইল নিয়ে প্রতিটি মাদার অ্যাকাউন্টে মেইল অ্যাড করবেন এবং reuse link সংরক্ষণ করবেন। "
+            "মাদার অ্যাকাউন্টের মেইল reuse link প্রতিটি অ্যাড অ্যাকাউন্টের মেইল reuse link হিসেবে গণ্য হয়। "
+            "বিক্রয়ের সময় এই মেইল reuse link গুলোও দিতে হবে।"
+        )
+        send_telegram_message(extra_notice, chat_id)
+
     msg = (f"💰 {type_label} বিক্রয় করুন\n\nপ্রতি একাউন্টের মূল্য: {price} টাকা\n\n"
            "প্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n"
            "উদাহরণ:\nuser1\nuser2\nuser3\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
@@ -1249,30 +1290,46 @@ def process_sell_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            accounts_list = []
-            for i in range(len(usernames)):
-                accounts_list.append({
-                    "username": usernames[i],
-                    "password": session["passwords"][i],
-                    "fa_key": ""
-                })
-            sell_id = uuid.uuid4().hex[:10]
-            sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time(), "type": "normal"}
-            with data_lock:
-                sell_requests.append(sell_req)
-                save_sell_requests()
-            save_data_to_channel()
-            del sell_sessions[chat_id]
-            total_expected = config["price_normal_sell"] * len(accounts_list)
-            send_telegram_message(f"✅ আপনার Normal একাউন্ট বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
-            tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
-            excel_bytes = generate_sell_excel(accounts_list, tg_username)
-            filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            caption = f"📊 নতুন Normal সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} {total_expected}\nবাতিল: /rejectsell {sell_id}"
-            send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption)
-            send_main_keyboard(chat_id)
+            # Normal: ask for reuse links
+            session["step"] = "reuse_links"
+            send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
+        return True
+    elif step == "reuse_links":
+        # Normal sell: process reuse links
+        raw_lines = text.splitlines()
+        reuse_links = [l.strip() for l in raw_lines]
+        usernames = session["usernames"]
+        while len(reuse_links) > len(usernames) and reuse_links and reuse_links[-1] == '':
+            reuse_links.pop()
+        if len(reuse_links) != len(usernames):
+            send_telegram_message(f"❌ ইমেইল রিইউজ লিংক সংখ্যা ({len(reuse_links)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে লিংক দিন।", chat_id)
+            return True
+        accounts_list = []
+        for i in range(len(usernames)):
+            accounts_list.append({
+                "username": usernames[i],
+                "password": session["passwords"][i],
+                "fa_key": "",
+                "reuse_link": reuse_links[i]
+            })
+        sell_id = uuid.uuid4().hex[:10]
+        sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time(), "type": "normal"}
+        with data_lock:
+            sell_requests.append(sell_req)
+            save_sell_requests()
+        save_data_to_channel()
+        del sell_sessions[chat_id]
+        total_expected = config["price_normal_sell"] * len(accounts_list)
+        send_telegram_message(f"✅ আপনার Normal একাউন্ট বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
+        tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
+        excel_bytes = generate_sell_excel(accounts_list, tg_username)  # now includes reuse_link
+        filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        caption = f"📊 নতুন Normal সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} {total_expected}\nবাতিল: /rejectsell {sell_id}"
+        send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption)
+        send_main_keyboard(chat_id)
         return True
     elif step == "fa_keys":
+        # 2FA sell (unchanged)
         raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
@@ -1286,7 +1343,8 @@ def process_sell_step(chat_id, text):
             accounts_list.append({
                 "username": usernames[i],
                 "password": session["passwords"][i],
-                "fa_key": fa_list[i]
+                "fa_key": fa_list[i],
+                "reuse_link": ""   # 2FA accounts don't have reuse link
             })
         sell_id = uuid.uuid4().hex[:10]
         sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time(), "type": "2fa"}
@@ -1306,7 +1364,7 @@ def process_sell_step(chat_id, text):
         return True
     return False
 
-# ================== WITHDRAW ==================
+# ================== WITHDRAW (unchanged) ==================
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
     msg = "💸 উইথড্র\n\nআপনার কত টাকা উত্তোলন করতে চান? (শুধু সংখ্যা লিখুন)\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।"
@@ -1362,7 +1420,7 @@ def process_withdraw_step(chat_id, text):
         return True
     return False
 
-# ================== ADMIN MARKETPLACE COMMANDS ==================
+# ================== ADMIN MARKETPLACE COMMANDS (unchanged except stock list) ==================
 def admin_stock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -1377,6 +1435,9 @@ def admin_stock_cmd(chat_id):
             line = f"{i}. [{type_tag}] ইউজার: {acc['username']} | পাস: {acc['password']}"
             if acc_type == "2fa":
                 line += f" | 2FA: {acc.get('fa_key', 'N/A')}"
+            else:
+                reuse = acc.get("reuse_link", "")
+                line += f" | Reuse Link: {reuse if reuse else 'N/A'}"
             msg_lines.append(line)
     send_telegram_message("\n".join(msg_lines), chat_id)
     return True
@@ -1791,7 +1852,6 @@ def handle_telegram_commands():
                             if chat_id in add_stock_sessions:
                                 del add_stock_sessions[chat_id]
                                 send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
-                        
                         continue
 
                     if "message" in update:
@@ -1817,7 +1877,7 @@ def handle_telegram_commands():
                                 handle_restore(chat_id, file_id)
                             continue
 
-                        # Smart Cancel: only if user is in an active session
+                        # Smart Cancel
                         cancel_keywords = ["cancel", "/cancel", "/start"]
                         if text.strip().lower() in cancel_keywords:
                             cancelled = False
@@ -1840,11 +1900,9 @@ def handle_telegram_commands():
                                     break
                             if cancelled:
                                 continue
-                            # If /cancel and no session, just show main keyboard
                             if text.strip().lower() == "/cancel":
                                 send_main_keyboard(chat_id)
                                 continue
-                            # If /start and no session, fall through to normal /start handling below
 
                         # Active sessions
                         if chat_id in support_sessions:
@@ -1990,7 +2048,6 @@ def handle_telegram_commands():
                                     save_subscribers()
                                 save_data_to_channel()
                                 send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_main_keyboard(chat_id))
-                                
                                 continue
                             elif text == "/stop":
                                 with data_lock:
@@ -2068,7 +2125,7 @@ if __name__ == "__main__":
     load_sell_requests()
     load_withdraw_requests()
 
-    ensure_polling()  # Delete webhook before starting polling
+    ensure_polling()
 
     auto_restore_from_channel()
 

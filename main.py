@@ -48,7 +48,7 @@ submission_sessions = {}
 support_sessions = set()
 maintenance_mode = False
 
-accounts = []               # now each dict contains 'type' field ('2fa' or 'normal')
+accounts = []               # each dict contains 'type' field ('2fa' or 'normal')
 balances = {}
 deposits = []
 config = {
@@ -73,6 +73,14 @@ last_backup_message_id = None
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
+
+# ================== HELPER: BENGALI NUMBER CONVERTER ==================
+def normalize_bengali_number(text):
+    """Convert Bengali numerals (০-৯) to ASCII digits."""
+    bengali_digits = "০১২৩৪৫৬৭৮৯"
+    english_digits = "0123456789"
+    trans_table = str.maketrans(bengali_digits, english_digits)
+    return text.translate(trans_table)
 
 # ================== FILE I/O ==================
 def load_mother_accounts():
@@ -334,6 +342,7 @@ def answer_callback_query(callback_id, text=None):
         logger.error(f"Callback answer error: {e}")
 
 # ================== CHANNEL BACKUP ==================
+# (unchanged, same as before)
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID:
@@ -396,7 +405,7 @@ def auto_backup_loop():
 def get_main_keyboard(chat_id):
     keyboard = [
         ["💰 ব্যালেন্স", "💸 ডিপোজিট"],
-        ["🛒 একাউন্ট কিনুন", "একাউন্ট বিক্রয় করুন"],
+        ["🛒 একাউন্ট কিনুন", "💰 একাউন্ট বিক্রয় করুন"],
         ["💸 উইথড্র"],
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
         ["📞 সাপোর্ট", "🛑 স্টপ"],
@@ -414,7 +423,7 @@ def remove_keyboard():
 def send_main_keyboard(chat_id, text="\u200b"):
     send_telegram_message(text, chat_id, reply_markup=get_main_keyboard(chat_id))
 
-# ================== EXCEL GENERATORS ==================
+# ================== EXCEL GENERATORS (unchanged) ==================
 def generate_submission_excel(usernames, passwords, twofa_list, bkash, telegram_username):
     wb = Workbook()
     ws = wb.active
@@ -506,11 +515,10 @@ def generate_sell_excel(accounts_list, telegram_username):
 # ================== SUBMISSION HANDLER ==================
 def start_submission(chat_id, sender_username):
     submission_sessions[chat_id] = {"step": "username", "data": {}, "username": sender_username}
-    send_telegram_message(
-        "📋 দয়া করে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n\n"
-        "উদাহরণ:\nuser1\nuser2\nuser3\n\nবাতিল করতে /cancel বা /start লিখুন।",
-        chat_id
-    )
+    msg = ("📋 দয়া করে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n\n"
+           "উদাহরণ:\nuser1\nuser2\nuser3\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_submission"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_submission_step(chat_id, text, sender_username):
     if chat_id not in submission_sessions:
@@ -529,7 +537,7 @@ def process_submission_step(chat_id, text, sender_username):
             return True
         session["data"]["usernames"] = lines
         session["step"] = "password"
-        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}\nবাতিল করতে /cancel বা /start।", chat_id)
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}\nবাতিল করতে /cancel বা উপরের বাটন।", chat_id)
         return True
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -539,7 +547,7 @@ def process_submission_step(chat_id, text, sender_username):
             return True
         session["data"]["passwords"] = lines
         session["step"] = "2fa"
-        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।\nবাতিল করতে /cancel বা /start।", chat_id)
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।\nবাতিল করতে /cancel বা উপরের বাটন।", chat_id)
         return True
     elif step == "2fa":
         raw_lines = text.splitlines()
@@ -552,7 +560,7 @@ def process_submission_step(chat_id, text, sender_username):
             return True
         session["data"]["twofa"] = twofa_list
         session["step"] = "bkash"
-        send_telegram_message("💳 দয়া করে আপনার **বিকাশ নম্বর** দিন:\nবাতিল করতে /cancel বা /start।", chat_id)
+        send_telegram_message("💳 দয়া করে আপনার **বিকাশ নম্বর** দিন:\nবাতিল করতে /cancel বা উপরের বাটন।", chat_id)
         return True
     elif step == "bkash":
         bkash_number = text.strip()
@@ -578,12 +586,11 @@ def process_submission_step(chat_id, text, sender_username):
 # ================== LOSS RECOVERY HANDLER ==================
 def start_loss_recovery(chat_id):
     loss_recovery_sessions[chat_id] = {"step": "usernames", "data": {}}
-    send_telegram_message(
-        "⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
-        "অনুগ্রহ করে সঠিক তথ্য দিন।\n\n"
-        "আপনার কেনা অ্যাকাউন্টগুলোর ইউজারনেম লিস্ট দিন (প্রতি লাইনে একটি):\nবাতিল করতে /cancel বা /start।",
-        chat_id
-    )
+    msg = ("⚠️ সতর্কতা: ভুল তথ্য দিলে লস রিকভারি পাবেন না। সকল তথ্য ম্যানুয়ালি যাচাই করা হবে।\n\n"
+           "অনুগ্রহ করে সঠিক তথ্য দিন।\n\n"
+           "আপনার কেনা অ্যাকাউন্টগুলোর ইউজারনেম লিস্ট দিন (প্রতি লাইনে একটি):\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_loss_recovery"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_loss_recovery_step(chat_id, text):
     if chat_id not in loss_recovery_sessions:
@@ -685,6 +692,7 @@ def handle_loss_recovery_file(chat_id, message):
     send_telegram_message("💳 দয়া করে আপনার বিকাশ নম্বর দিন (যেটি ব্যবহার করেছিলেন):", chat_id)
 
 # ================== MOTHER ACCOUNT ==================
+# (unchanged)
 def handle_addmother(chat_id, args):
     if str(chat_id) != ADMIN_CHAT_ID:
         send_telegram_message("❌ আপনি এই কমান্ড ব্যবহার করতে পারবেন না।", chat_id)
@@ -957,10 +965,10 @@ def start_add_stock(chat_id, acc_type):
         return
     add_stock_sessions[chat_id] = {"step": "usernames", "type": acc_type}
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
-    send_telegram_message(
-        f"➕ স্টক যোগ করুন ({type_label})\n\nপ্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start বা /cancel দিয়ে বাতিল করুন।",
-        chat_id
-    )
+    msg = (f"➕ স্টক যোগ করুন ({type_label})\n\nপ্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n"
+           "উদাহরণ:\nuser1\nuser2\nuser3\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_addstock"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_add_stock_step(chat_id, text):
     if chat_id not in add_stock_sessions:
@@ -1045,7 +1053,9 @@ def start_deposit(chat_id):
         send_main_keyboard(chat_id)
         deposit_sessions.pop(chat_id, None)
         return
-    send_telegram_message(f"💸 দয়া করে আপনার জমা করার টাকার পরিমাণ লিখুন (শুধু সংখ্যা, যেমন: 100)\n\nবিকাশ নম্বর: {bkash}\n\nবাতিল করতে /cancel বা /start।", chat_id)
+    msg = f"💸 দয়া করে আপনার জমা করার টাকার পরিমাণ লিখুন (শুধু সংখ্যা, যেমন: 100)\n\nবিকাশ নম্বর: {bkash}\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।"
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_deposit"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_deposit_step(chat_id, text):
     if chat_id not in deposit_sessions:
@@ -1059,11 +1069,11 @@ def process_deposit_step(chat_id, text):
     step = session["step"]
     if step == "amount":
         try:
-            amount = float(text)
+            amount = float(normalize_bengali_number(text.strip()))
             if amount <= 0:
                 raise ValueError
         except:
-            send_telegram_message("⚠️ সঠিক সংখ্যা দিন। /cancel দিয়ে বাতিল করুন।", chat_id)
+            send_telegram_message("⚠️ সঠিক সংখ্যা দিন (ইংরেজি বা বাংলা)। /cancel দিয়ে বাতিল করুন।", chat_id)
             return True
         session["amount"] = amount
         session["step"] = "trxid"
@@ -1096,11 +1106,25 @@ def start_buy_session(chat_id, acc_type):
     price = config["price_2fa_buy"] if acc_type == "2fa" else config["price_normal_buy"]
     count = len([a for a in accounts if a.get("type") == acc_type])
     if acc_type == "2fa":
-        warning = "ইনস্টাগ্রাম কুকিজ এর কাজ যারা করেন আমাদের থেকে একাউন্ট কিনে কুকিজ সাবমিট দিলে যদি রিপোর্ট খারাপ হওয়ার কারণে আপনার লস হয় তবে আপনি লস রিকভারি অপশন থেকে আপনার যে পরিমাণ টাকা লস হবে তা ফেরত পাবেন।"
+        warning = (
+            "🔐 2FA ON একাউন্টের ক্ষেত্রে:\n"
+            "ইনস্টাগ্রাম কুকিজ সাবমিটে রিপোর্ট খারাপ হওয়ার কারণে যত টাকা লস হবে, "
+            "সেই লস হওয়া টাকা (১০০%) লস রিকভারি অপশনের মাধ্যমে ফেরত পাবেন।"
+        )
     else:
-        warning = "Normal একাউন্ট এর ক্ষেত্রে লস রিকভারি অপশন ব্যবহার করলে লস হওয়া টাকার ৫০% ফেরত দেয়া হবে।"
-    msg = f"🛒 {type_label}\n\n{warning}\n\nকতটি একাউন্ট কিনতে চান? (সংখ্যা লিখুন)\nপ্রতি একাউন্টের মূল্য: {price} টাকা\nস্টকে আছে: {count} টি\nবাতিল করতে /cancel বা /start।"
-    send_telegram_message(msg, chat_id)
+        warning = (
+            "📄 Normal একাউন্টের ক্ষেত্রে:\n"
+            "ইনস্টাগ্রাম কুকিজ সাবমিটে রিপোর্ট খারাপ হওয়ার কারণে যত টাকা লস হবে, "
+            "তার ৫০% টাকা লস রিকভারি অপশনের মাধ্যমে ফেরত পাবেন।\n"
+            "Normal একাউন্টে কোনো 2FA কী থাকে না।"
+        )
+    msg = (f"🛒 {type_label}\n\n{warning}\n\n"
+           f"কতটি একাউন্ট কিনতে চান? (সংখ্যা লিখুন)\n"
+           f"প্রতি একাউন্টের মূল্য: {price} টাকা\n"
+           f"স্টকে আছে: {count} টি\n\n"
+           f"বাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_buy"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def handle_buy(chat_id, text):
     session = buy_sessions.get(chat_id)
@@ -1111,12 +1135,13 @@ def handle_buy(chat_id, text):
         send_telegram_message("❌ কেনা বাতিল করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
         return True
+    clean_text = normalize_bengali_number(text.strip())
     try:
-        qty = int(text)
+        qty = int(clean_text)
         if qty <= 0:
             raise ValueError
     except:
-        send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id)
+        send_telegram_message("⚠️ সঠিক সংখ্যা দিন (ইংরেজি বা বাংলা)।", chat_id)
         return False
     acc_type = session["type"]
     price = config["price_2fa_buy"] if acc_type == "2fa" else config["price_normal_buy"]
@@ -1171,10 +1196,11 @@ def start_sell_session(chat_id, acc_type):
     else:
         warning = "⚠️ সতর্কতা:\n\nNormal একাউন্টের ক্ষেত্রে লস রিকভারি করা হলে লসের ৫০% আপনার সেল এমাউন্ট থেকে কাটা হবে।"
     send_telegram_message(warning, chat_id)
-    send_telegram_message(
-        f"💰 {type_label} বিক্রয় করুন\n\nপ্রতি একাউন্টের মূল্য: {price} টাকা\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\nউদাহরণ:\nuser1\nuser2\nuser3\n\n/start বা /cancel দিয়ে বাতিল করুন।",
-        chat_id
-    )
+    msg = (f"💰 {type_label} বিক্রয় করুন\n\nপ্রতি একাউন্টের মূল্য: {price} টাকা\n\n"
+           "প্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি করে):\n"
+           "উদাহরণ:\nuser1\nuser2\nuser3\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।")
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_sell"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_sell_step(chat_id, text):
     if chat_id not in sell_sessions:
@@ -1267,7 +1293,9 @@ def process_sell_step(chat_id, text):
 # ================== WITHDRAW ==================
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
-    send_telegram_message("💸 উইথড্র\n\nআপনার কত টাকা উত্তোলন করতে চান? (শুধু সংখ্যা লিখুন)\n/start বা /cancel দিয়ে বাতিল করুন।", chat_id)
+    msg = "💸 উইথড্র\n\nআপনার কত টাকা উত্তোলন করতে চান? (শুধু সংখ্যা লিখুন)\n\nবাতিল করতে নিচের বাটনে চাপুন বা /cancel টাইপ করুন।"
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_withdraw"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def process_withdraw_step(chat_id, text):
     if chat_id not in withdraw_sessions:
@@ -1281,11 +1309,11 @@ def process_withdraw_step(chat_id, text):
     step = session["step"]
     if step == "amount":
         try:
-            amount = float(text)
+            amount = float(normalize_bengali_number(text.strip()))
             if amount <= 0:
                 raise ValueError
         except:
-            send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id)
+            send_telegram_message("⚠️ সঠিক সংখ্যা দিন (ইংরেজি বা বাংলা)।", chat_id)
             return True
         with data_lock:
             bal = balances.get(str(chat_id), 0)
@@ -1372,11 +1400,11 @@ def admin_setprice_cmd(chat_id, args):
         return True
     acc_type = parts[0].lower()
     try:
-        price = float(parts[1])
+        price = float(normalize_bengali_number(parts[1]))
         if price <= 0:
             raise ValueError
     except:
-        send_telegram_message("❌ সঠিক মূল্য দিন।", chat_id)
+        send_telegram_message("❌ সঠিক মূল্য দিন (ইংরেজি বা বাংলা সংখ্যা)।", chat_id)
         return True
     if acc_type == "2fa":
         config["price_2fa_buy"] = price
@@ -1399,11 +1427,11 @@ def admin_setsellprice_cmd(chat_id, args):
         return True
     acc_type = parts[0].lower()
     try:
-        price = float(parts[1])
+        price = float(normalize_bengali_number(parts[1]))
         if price <= 0:
             raise ValueError
     except:
-        send_telegram_message("❌ সঠিক মূল্য দিন।", chat_id)
+        send_telegram_message("❌ সঠিক মূল্য দিন (ইংরেজি বা বাংলা সংখ্যা)।", chat_id)
         return True
     if acc_type == "2fa":
         config["price_2fa_sell"] = price
@@ -1480,9 +1508,9 @@ def admin_addbalance_cmd(chat_id, uid, amt_str):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
     try:
-        amt = float(amt_str)
+        amt = float(normalize_bengali_number(amt_str))
     except:
-        send_telegram_message("❌ সঠিক পরিমাণ দিন।", chat_id)
+        send_telegram_message("❌ সঠিক পরিমাণ দিন (ইংরেজি বা বাংলা সংখ্যা)।", chat_id)
         return True
     with data_lock:
         balances[str(uid)] = balances.get(str(uid), 0) + amt
@@ -1718,6 +1746,34 @@ def handle_telegram_commands():
                         elif data_cb == "addstock_normal":
                             if str(chat_id) == ADMIN_CHAT_ID:
                                 start_add_stock(chat_id, "normal")
+                        elif data_cb == "cancel_buy":
+                            if chat_id in buy_sessions:
+                                del buy_sessions[chat_id]
+                                send_telegram_message("❌ কেনা বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_deposit":
+                            if chat_id in deposit_sessions:
+                                del deposit_sessions[chat_id]
+                                send_telegram_message("❌ ডিপোজিট বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_withdraw":
+                            if chat_id in withdraw_sessions:
+                                del withdraw_sessions[chat_id]
+                                send_telegram_message("❌ উইথড্র বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_submission":
+                            if chat_id in submission_sessions:
+                                del submission_sessions[chat_id]
+                                send_telegram_message("❌ জমা প্রক্রিয়া বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_sell":
+                            if chat_id in sell_sessions:
+                                del sell_sessions[chat_id]
+                                send_telegram_message("❌ বিক্রয় বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_loss_recovery":
+                            if chat_id in loss_recovery_sessions:
+                                del loss_recovery_sessions[chat_id]
+                                send_telegram_message("❌ লস রিকভারি বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                        elif data_cb == "cancel_addstock":
+                            if chat_id in add_stock_sessions:
+                                del add_stock_sessions[chat_id]
+                                send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
                         continue
 
                     if "message" in update:
@@ -1771,9 +1827,6 @@ def handle_telegram_commands():
                                 send_main_keyboard(chat_id)
                                 continue
                             # If /start and no session, fall through to normal /start handling below
-                            if text.strip().lower() == "/start":
-                                # let it go to /start handler below
-                                pass
 
                         # Active sessions
                         if chat_id in support_sessions:
@@ -1847,7 +1900,7 @@ def handle_telegram_commands():
                             }
                             send_telegram_message("কোন ধরনের একাউন্ট কিনতে চান?", chat_id, reply_markup=inline_kb)
                             continue
-                        elif text == "একাউন্ট বিক্রয় করুন":
+                        elif text == "💰 একাউন্ট বিক্রয় করুন":
                             inline_kb = {
                                 "inline_keyboard": [
                                     [{"text": "2FA ON একাউন্ট", "callback_data": "sell_2fa"}],

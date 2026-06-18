@@ -48,7 +48,7 @@ submission_sessions = {}
 support_sessions = set()
 maintenance_mode = False
 
-accounts = []               # now each dict will contain 'type' field
+accounts = []               # now each dict contains 'type' field ('2fa' or 'normal')
 balances = {}
 deposits = []
 config = {
@@ -62,10 +62,10 @@ config = {
     "maintenance_mode": False
 }
 deposit_sessions = {}
-buy_sessions = {}           # changed to dict to store type
+buy_sessions = {}           # chat_id -> {"step": "quantity", "type": "2fa"|"normal"}
 add_stock_sessions = {}
 loss_recovery_sessions = {}
-sell_sessions = {}           # changed to dict to store type
+sell_sessions = {}          # chat_id -> {"step": ..., "type": "2fa"|"normal"}
 sell_requests = []
 withdraw_requests = []
 withdraw_sessions = {}
@@ -914,7 +914,6 @@ def _perform_restore(file_id):
         mother_accounts = backup.get("mother_accounts", [])
         user_last_request = backup.get("user_cooldowns", {})
         accounts = backup.get("market_accounts", backup.get("accounts", []))
-        # Add type migration for restored accounts
         for acc in accounts:
             if 'type' not in acc:
                 acc['type'] = '2fa'
@@ -994,7 +993,6 @@ def process_add_stock_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            # Normal accounts: no 2FA, use empty strings
             count = len(usernames)
             with data_lock:
                 for i in range(count):
@@ -1132,7 +1130,6 @@ def handle_buy(chat_id, text):
         if user_balance < total:
             send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই।\nপ্রয়োজন: {total} টাকা\nআপনার ব্যালেন্স: {user_balance} টাকা\nদয়া করে প্রথমে ডিপোজিট করুন।", chat_id)
             return False
-        # Select the first qty of that type
         to_buy = []
         new_accounts = []
         bought_count = 0
@@ -1210,7 +1207,6 @@ def process_sell_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            # Normal sell: no 2FA
             accounts_list = []
             for i in range(len(usernames)):
                 accounts_list.append({
@@ -1327,20 +1323,18 @@ def admin_stock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
     with data_lock:
-        twofa_stock = [a for a in accounts if a.get("type") == "2fa"]
-        normal_stock = [a for a in accounts if a.get("type") == "normal"]
-        msg = f"📦 মোট স্টক: {len(accounts)} টি\n"
-        msg += f"  - 2FA ON একাউন্ট: {len(twofa_stock)} টি\n"
-        msg += f"  - Normal একাউন্ট: {len(normal_stock)} টি\n\n"
-        if twofa_stock:
-            msg += "2FA ON একাউন্ট:\n"
-            for i, acc in enumerate(twofa_stock, 1):
-                msg += f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key', 'N/A')}\n"
-        if normal_stock:
-            msg += "Normal একাউন্ট:\n"
-            for i, acc in enumerate(normal_stock, 1):
-                msg += f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']}\n"
-    send_telegram_message(msg, chat_id)
+        if not accounts:
+            send_telegram_message("📭 স্টক খালি।", chat_id)
+            return True
+        msg_lines = [f"📦 মোট স্টক: {len(accounts)} টি\n"]
+        for i, acc in enumerate(accounts, 1):
+            acc_type = acc.get("type", "2fa")
+            type_tag = "🔐 2FA" if acc_type == "2fa" else "📄 Normal"
+            line = f"{i}. [{type_tag}] ইউজার: {acc['username']} | পাস: {acc['password']}"
+            if acc_type == "2fa":
+                line += f" | 2FA: {acc.get('fa_key', 'N/A')}"
+            msg_lines.append(line)
+    send_telegram_message("\n".join(msg_lines), chat_id)
     return True
 
 def admin_deletestock_cmd(chat_id, arg):
@@ -1349,7 +1343,6 @@ def admin_deletestock_cmd(chat_id, arg):
     try:
         idx = int(arg) - 1
         with data_lock:
-            # Separate lists to maintain index for each type? We'll accept global index.
             if 0 <= idx < len(accounts):
                 deleted = accounts.pop(idx)
                 save_accounts()
@@ -1710,7 +1703,7 @@ def handle_telegram_commands():
                         from_user = cb.get("from", {})
                         sender_username = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         user_info[chat_id] = sender_username
-                        answer_callback_query(cbid)  # acknowledge
+                        answer_callback_query(cbid)
                         if data_cb == "buy_2fa":
                             start_buy_session(chat_id, "2fa")
                         elif data_cb == "buy_normal":
@@ -1750,54 +1743,37 @@ def handle_telegram_commands():
                                 handle_restore(chat_id, file_id)
                             continue
 
-                        # Cancel keyword for any session
-                        if text.strip().lower() in ["cancel", "/cancel", "/start"]:
-                            # Cancel all active sessions for this chat
-                            session_found = False
-                            if chat_id in support_sessions:
-                                support_sessions.discard(chat_id)
-                                send_telegram_message("সাপোর্ট বাতিল করা হয়েছে।", chat_id)
+                        # Smart Cancel: only if user is in an active session
+                        cancel_keywords = ["cancel", "/cancel", "/start"]
+                        if text.strip().lower() in cancel_keywords:
+                            cancelled = False
+                            sessions = [
+                                (support_sessions, "সাপোর্ট"),
+                                (deposit_sessions, "ডিপোজিট"),
+                                (submission_sessions, "জমা"),
+                                (add_stock_sessions, "স্টক যোগ"),
+                                (loss_recovery_sessions, "লস রিকভারি"),
+                                (sell_sessions, "বিক্রয়"),
+                                (withdraw_sessions, "উইথড্র"),
+                                (buy_sessions, "কেনা")
+                            ]
+                            for sess_dict, name in sessions:
+                                if chat_id in sess_dict:
+                                    del sess_dict[chat_id]
+                                    send_telegram_message(f"❌ {name} বাতিল করা হয়েছে।", chat_id)
+                                    send_main_keyboard(chat_id)
+                                    cancelled = True
+                                    break
+                            if cancelled:
+                                continue
+                            # If /cancel and no session, just show main keyboard
+                            if text.strip().lower() == "/cancel":
                                 send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in deposit_sessions:
-                                del deposit_sessions[chat_id]
-                                send_telegram_message("❌ ডিপোজিট বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in submission_sessions:
-                                del submission_sessions[chat_id]
-                                send_telegram_message("❌ জমা প্রক্রিয়া বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in add_stock_sessions:
-                                del add_stock_sessions[chat_id]
-                                send_telegram_message("❌ স্টক যোগ বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in loss_recovery_sessions:
-                                del loss_recovery_sessions[chat_id]
-                                send_telegram_message("❌ লস রিকভারি বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in sell_sessions:
-                                del sell_sessions[chat_id]
-                                send_telegram_message("❌ বিক্রয় বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in withdraw_sessions:
-                                del withdraw_sessions[chat_id]
-                                send_telegram_message("❌ উইথড্র বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if chat_id in buy_sessions:
-                                buy_sessions.pop(chat_id, None)
-                                send_telegram_message("❌ কেনা বাতিল করা হয়েছে।", chat_id)
-                                send_main_keyboard(chat_id)
-                                session_found = True
-                            if not session_found:
-                                # If not in any session, just show main keyboard
-                                send_main_keyboard(chat_id)
-                            continue
+                                continue
+                            # If /start and no session, fall through to normal /start handling below
+                            if text.strip().lower() == "/start":
+                                # let it go to /start handler below
+                                pass
 
                         # Active sessions
                         if chat_id in support_sessions:
@@ -1852,7 +1828,7 @@ def handle_telegram_commands():
                                 subscribed_users.discard(chat_id)
                                 save_subscribers()
                             save_data_to_channel()
-                            send_telegram_message("আপনার সাবস্ক্রিপশন বন্ধ করা হয়েছে।", chat_id, reply_markup=remove_keyboard())
+                            send_telegram_message("আপনার সাবস্ক্রিপশন বন্ধ করা হয়েছে। পুনরায় যুক্ত হতে /start দিন।", chat_id, reply_markup=get_main_keyboard(chat_id))
                             continue
                         elif text == "💰 ব্যালেন্স":
                             bal = balances.get(chat_id, 0)
@@ -1863,7 +1839,6 @@ def handle_telegram_commands():
                             start_deposit(chat_id)
                             continue
                         elif text == "🛒 একাউন্ট কিনুন":
-                            # Show inline submenu
                             inline_kb = {
                                 "inline_keyboard": [
                                     [{"text": "2FA ON একাউন্ট", "callback_data": "buy_2fa"}],
@@ -1950,10 +1925,10 @@ def handle_telegram_commands():
                                     subscribed_users.discard(chat_id)
                                     save_subscribers()
                                 save_data_to_channel()
-                                send_telegram_message("সাবস্ক্রিপশন বন্ধ করা হয়েছে।", chat_id, reply_markup=remove_keyboard())
+                                send_telegram_message("সাবস্ক্রিপশন বন্ধ করা হয়েছে। পুনরায় যুক্ত হতে /start দিন।", chat_id, reply_markup=get_main_keyboard(chat_id))
                                 continue
                             elif text.startswith("/addmother"):
-                                args = text[len("/addmother"):].strip() if len(text) > len("/addmother") else ""
+                                args = text[len("/addmother"):].strip()
                                 handle_addmother(chat_id, args)
                                 continue
                             elif text == "/getmother":

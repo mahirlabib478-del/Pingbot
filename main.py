@@ -1239,10 +1239,10 @@ def start_sell_session(chat_id, acc_type):
     type_label = "2FA ON একাউন্ট" if acc_type == "2fa" else "Normal একাউন্ট"
     price = config["price_2fa_sell"] if acc_type == "2fa" else config["price_normal_sell"]
     if acc_type == "2fa":
-        warning = "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে যদি তাদের লস হয় যে পরিমাণ টাকা লস হবে তা আপনার সেল এমাউন্ট হতে মাইনাস হবে।"
+        warning = "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে তাদের যতগুলা আইডি ব্যাক আসবে সেই পরিমাণ টাকা আপনার সেল একাউন্ট হতে মাইনাস করা হবে।"
         send_telegram_message(warning, chat_id)
     else:
-        warning = "⚠️ সতর্কতা:\n\nNormal একাউন্টের ক্ষেত্রে লস রিকভারি করা হলে লসের ৫০% আপনার সেল এমাউন্ট থেকে কাটা হবে।"
+        warning = "⚠️ সতর্কতা:\n\nআপনি যে একাউন্ট গুলো সেল দিবেন সেগুলো আমাদের ইউজাররা কুকিজ সাবমিট করে তাদের যতগুলা আইডি ব্যাক আসবে সেই পরিমাণ টাকা আপনার সেল একাউন্ট হতে মাইনাস করা হবে।"
         send_telegram_message(warning, chat_id)
         # Extra notice for normal accounts about email reuse link
         extra_notice = (

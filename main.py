@@ -954,7 +954,7 @@ def auto_restore_from_channel():
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
 
-# ================== ADMIN ADD STOCK FLOW (now includes type) ==================
+# ================== ADMIN ADD STOCK FLOW (UPDATED) ==================
 def start_add_stock(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return
@@ -1005,10 +1005,35 @@ def process_add_stock_step(chat_id, text):
             send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।", chat_id)
             return True
         session["passwords"] = lines
+
+        # Normal একাউন্ট হলে 2FA ধাপ বাদ, সরাসরি যোগ করো
+        if session.get("account_type") == "normal":
+            acc_type = "normal"
+            count = len(usernames)
+            with data_lock:
+                for i in range(count):
+                    accounts.append({
+                        "username": usernames[i],
+                        "password": session["passwords"][i],
+                        "fa_key": "",
+                        "type": acc_type
+                    })
+                save_accounts()
+            save_data_to_channel()
+            del add_stock_sessions[chat_id]
+            type_display = "Normal"
+            price = config["price_normal"]
+            broadcast_message(f"📢 নতুন একাউন্ট স্টক যোগ হয়েছে:\nধরণ: {type_display} একাউন্ট\nসংখ্যা: {count} টি\nপ্রতি একাউন্ট মূল্য (ক্রয়): {price} টাকা")
+            send_telegram_message(f"✅ {count} টি {type_display} একাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
+            send_main_keyboard(chat_id)
+            return True
+
+        # 2FA ON হলে 2FA ধাপে যাও
         session["step"] = "fa_keys"
         send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         return True
     elif step == "fa_keys":
+        # এই ধাপ শুধু 2fa_on এর জন্য আসবে
         raw_lines = text.splitlines()
         fa_list = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
@@ -1030,9 +1055,8 @@ def process_add_stock_step(chat_id, text):
             save_accounts()
         save_data_to_channel()
         del add_stock_sessions[chat_id]
-        # broadcast to all users
-        type_display = "2FA ON" if acc_type == "2fa_on" else "Normal"
-        price = config["price_2fa_on"] if acc_type == "2fa_on" else config["price_normal"]
+        type_display = "2FA ON"
+        price = config["price_2fa_on"]
         broadcast_message(f"📢 নতুন একাউন্ট স্টক যোগ হয়েছে:\nধরণ: {type_display} একাউন্ট\nসংখ্যা: {count} টি\nপ্রতি একাউন্ট মূল্য (ক্রয়): {price} টাকা")
         send_telegram_message(f"✅ {count} টি {type_display} একাউন্ট স্টকে যোগ করা হয়েছে।", chat_id)
         send_main_keyboard(chat_id)
@@ -1136,7 +1160,7 @@ def handle_buy(chat_id, quantity_str, account_type):
     save_data_to_channel()
     return True
 
-# ================== SELL ==================
+# ================== SELL (UPDATED) ==================
 def start_sell(chat_id):
     sell_sessions[chat_id] = {"step": "choose_type"}
     send_telegram_message(
@@ -1203,6 +1227,44 @@ def process_sell_step(chat_id, text):
             send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। পুনরায় সঠিক লিস্ট দিন।", chat_id)
             return True
         session["passwords"] = lines
+
+        # Normal একাউন্ট হলে 2FA প্রম্পট বাদ, সরাসরি রিকোয়েস্ট তৈরি
+        if session.get("account_type") == "normal":
+            acc_type = "normal"
+            accounts_list = []
+            for i in range(len(usernames)):
+                accounts_list.append({
+                    "username": usernames[i],
+                    "password": session["passwords"][i],
+                    "fa_key": ""
+                })
+            sell_id = uuid.uuid4().hex[:10]
+            sell_req = {
+                "id": sell_id,
+                "user_id": chat_id,
+                "accounts": accounts_list,
+                "status": "pending",
+                "time": time.time(),
+                "type": acc_type
+            }
+            with data_lock:
+                sell_requests.append(sell_req)
+                save_sell_requests()
+            save_data_to_channel()
+            del sell_sessions[chat_id]
+            sell_price = config["sell_price_normal"]
+            total_expected = sell_price * len(accounts_list)
+            send_telegram_message(f"✅ আপনার বিক্রয় রিকোয়েস্ট জমা হয়েছে।\nআইডি: {sell_id}\nধরণ: Normal\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nরিভিউ সম্পন্ন হতে ২৪ ঘণ্টা পর্যন্ত সময় লাগতে পারে।", chat_id)
+            tg_username = user_info.get(str(chat_id), f"ID:{chat_id}")
+            excel_bytes = generate_sell_excel(accounts_list, tg_username, "Normal")
+            filename = f"sell_{sell_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            caption = f"📊 নতুন সেল রিকোয়েস্ট\nআইডি: {sell_id}\nইউজার: {tg_username} (`{chat_id}`)\nধরণ: Normal\nঅ্যাকাউন্ট সংখ্যা: {len(accounts_list)}\nপ্রত্যাশিত মূল্য: {total_expected} টাকা\nঅনুমোদন: /approvesell {sell_id} (অটো মূল্য {total_expected}) বা /approvesell {sell_id} <amount>"
+            if not send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption):
+                send_telegram_message(f"📊 সেল রিকোয়েস্ট (ফাইল পাঠানো যায়নি)\nআইডি: {sell_id}\nইউজার: {tg_username} ({chat_id})\nধরণ: Normal\nঅ্যাকাউন্ট: " + ", ".join([a['username'] for a in accounts_list]) + f"\nঅনুমোদন: /approvesell {sell_id} <amount>", ADMIN_CHAT_ID)
+            send_main_keyboard(chat_id)
+            return True
+
+        # 2FA ON হলে fa_keys ধাপে যাও
         session["step"] = "fa_keys"
         send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         return True

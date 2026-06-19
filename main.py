@@ -1501,24 +1501,38 @@ def process_withdraw_step(chat_id, text):
 def admin_stock_cmd(chat_id):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
-    with data_lock:
-        if not accounts:
-            send_telegram_message("📭 স্টক খালি।", chat_id)
-            return True
-        msg_lines = [f"📦 মোট স্টক: {len(accounts)} টি\n"]
-        for i, acc in enumerate(accounts, 1):
-            acc_type = acc.get("type", "2fa")
-            type_tag = "🔐 2FA" if acc_type == "2fa" else "📄 Normal"
-            line = f"{i}. [{type_tag}] ইউজার: {acc['username']} | পাস: {acc['password']}"
-            if acc_type == "2fa":
-                line += f" | 2FA: {acc.get('fa_key', 'N/A')}"
-            else:
-                reuse = acc.get("reuse_link", "")
-                line += f" | Reuse Link: {reuse if reuse else 'N/A'}"
-            msg_lines.append(line)
-    send_telegram_message("\n".join(msg_lines), chat_id)
+    try:
+        with data_lock:
+            if not accounts:
+                send_telegram_message("📭 স্টক খালি।", chat_id)
+                return True
+            msg_lines = [f"📦 মোট স্টক: {len(accounts)} টি\n"]
+            for i, acc in enumerate(accounts, 1):
+                acc_type = acc.get("type", "2fa")
+                type_tag = "🔐 2FA" if acc_type == "2fa" else "📄 Normal"
+                username = acc.get("username", "N/A")
+                password = acc.get("password", "N/A")
+                line = f"{i}. [{type_tag}] ইউজার: {username} | পাস: {password}"
+                if acc_type == "2fa":
+                    line += f" | 2FA: {acc.get('fa_key', 'N/A')}"
+                else:
+                    reuse = acc.get("reuse_link", "")
+                    if len(reuse) > 50:
+                        reuse = reuse[:50] + "..."
+                    line += f" | Reuse Link: {reuse if reuse else 'N/A'}"
+                msg_lines.append(line)
+        full_text = "\n".join(msg_lines)
+        # যদি এখনো দৈর্ঘ্য সীমা ছাড়ায়, তবে অটোমেটিক টুকরো করে পাঠানোর ব্যবস্থা
+        if len(full_text) > 4096:
+            parts = [full_text[i:i+4096] for i in range(0, len(full_text), 4096)]
+            for part in parts:
+                send_telegram_message(part, chat_id)
+        else:
+            send_telegram_message(full_text, chat_id)
+    except Exception as e:
+        logger.exception("Stock display error")
+        send_telegram_message(f"⚠️ স্টক দেখাতে সমস্যা: {e}", ADMIN_CHAT_ID)
     return True
-
 def admin_deletestock_cmd(chat_id, arg):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False

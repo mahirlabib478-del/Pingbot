@@ -451,7 +451,7 @@ def get_main_keyboard(chat_id):
         ["📋 সাবমিট", "🎁 মাদার একাউন্ট"],
         ["📞 সাপোর্ট", "🛑 স্টপ"],
         ["🔄 লস রিকভারি"],
-        ["👥 রেফারেল"]  # রেফারেল বাটন যোগ করা হলো
+        ["👥 রেফারেল"]
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         keyboard.append(["📥 ডিপোজিট রিকোয়েস্ট", "➕ স্টক যোগ করুন"])
@@ -465,7 +465,7 @@ def remove_keyboard():
 def send_main_keyboard(chat_id, text="\u200b"):
     send_telegram_message(text, chat_id, reply_markup=get_main_keyboard(chat_id))
 
-# ================== EXCEL GENERATORS (updated for reuse_link) ==================
+# ================== EXCEL GENERATORS ==================
 def generate_submission_excel(usernames, passwords, twofa_list, bkash, telegram_username):
     wb = Workbook()
     ws = wb.active
@@ -504,7 +504,7 @@ def generate_purchase_excel(bought):
     wb = Workbook()
     ws = wb.active
     ws.title = "Purchased Accounts"
-    headers = ["Username", "Password", "2FA Key", "Email Reuse Link"]
+    headers = ["Username", "Password", "2FA Key", "Email Access Token"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -536,7 +536,7 @@ def generate_sell_excel(accounts_list, telegram_username):
     wb = Workbook()
     ws = wb.active
     ws.title = "Sell Request"
-    headers = ["Username", "Password", "2FA Key", "Email Reuse Link", "Telegram Username"]
+    headers = ["Username", "Password", "2FA Key", "Email Access Token", "Telegram Username"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -585,7 +585,6 @@ def handle_referral_command(chat_id):
     send_telegram_message(msg, chat_id)
 
 def process_referral_on_start(chat_id, text):
-    """ এক্সট্রাক্ট রেফার কোড এবং সেট করে """
     if not text or " " not in text:
         return
     parts = text.split(maxsplit=1)
@@ -594,12 +593,11 @@ def process_referral_on_start(chat_id, text):
     ref_code = parts[1].strip()
     if ref_code.startswith("ref_"):
         ref_id = ref_code[4:]
-        if ref_id.isdigit() and ref_id != str(chat_id):  # নিজের রেফারেল নয়
+        if ref_id.isdigit() and ref_id != str(chat_id):
             with data_lock:
-                if str(chat_id) not in referrals:  # ইতিমধ্যে রেফারেল থাকলে পরিবর্তন নয়
+                if str(chat_id) not in referrals:
                     referrals[str(chat_id)] = ref_id
                     save_referrals()
-                    # রেফারকারীকে নোটিফাই
                     ref_name = user_info.get(ref_id, f"ID:{ref_id}")
                     send_telegram_message(
                         f"🎉 আপনি একটি নতুন রেফারেল পেয়েছেন!\nইউজার: {user_info.get(str(chat_id), chat_id)} জয়েন করেছে।",
@@ -1114,17 +1112,17 @@ def process_add_stock_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            session["step"] = "reuse_links"
-            send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
+            session["step"] = "access_tokens"
+            send_telegram_message(f"📧 এখন **ইমেইল এক্সেস টোকেন** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত এক্সেস টোকেন দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
         return True
-    elif step == "reuse_links":
+    elif step == "access_tokens":
         raw_lines = text.splitlines()
-        reuse_links = [l.strip() for l in raw_lines]
+        access_tokens = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
-        while len(reuse_links) > len(usernames) and reuse_links and reuse_links[-1] == '':
-            reuse_links.pop()
-        if len(reuse_links) != len(usernames):
-            send_telegram_message(f"❌ ইমেইল রিইউজ লিংক সংখ্যা ({len(reuse_links)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে লিংক দিন।", chat_id)
+        while len(access_tokens) > len(usernames) and access_tokens and access_tokens[-1] == '':
+            access_tokens.pop()
+        if len(access_tokens) != len(usernames):
+            send_telegram_message(f"❌ ইমেইল এক্সেস টোকেন সংখ্যা ({len(access_tokens)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে এক্সেস টোকেন দিন।", chat_id)
             return True
         count = len(usernames)
         with data_lock:
@@ -1134,13 +1132,13 @@ def process_add_stock_step(chat_id, text):
                     "password": session["passwords"][i],
                     "fa_key": "",
                     "type": "normal",
-                    "reuse_link": reuse_links[i]
+                    "reuse_link": access_tokens[i]
                 })
             save_accounts()
         save_data_to_channel()
         del add_stock_sessions[chat_id]
         broadcast_message(f"📢 নতুন স্টক যোগ করা হয়েছে: {count} টি Normal একাউন্ট।")
-        send_telegram_message(f"✅ {count} টি Normal একাউন্ট স্টকে যোগ করা হয়েছে (reuse link সহ)।", chat_id)
+        send_telegram_message(f"✅ {count} টি Normal একাউন্ট স্টকে যোগ করা হয়েছে (access token সহ)।", chat_id)
         send_main_keyboard(chat_id)
         return True
     elif step == "fa_keys":
@@ -1244,7 +1242,7 @@ def start_buy_session(chat_id, acc_type):
             "ইনস্টাগ্রাম কুকিজ সাবমিট দিয়ে যত পিস একাউন্টের রিপোর্ট ব্যাক আসবে, "
             "সব একাউন্টের টাকা ফেরত পাবেন লস রিকভারি অপশন ব্যবহারের মাধ্যমে।\n"
             "Normal একাউন্টে কোনো 2FA কী থাকে না।\n"
-            "এক্সেল ফাইলে ইমেইল রিইউজ লিংক দেওয়া থাকবে।"
+            "এক্সেল ফাইলে ইমেইল এক্সেস টোকেন দেওয়া থাকবে।"
         )
     msg = (f"🛒 {type_label}\n\n{warning}\n\n"
            f"কতটি একাউন্ট কিনতে চান? (সংখ্যা লিখুন)\n"
@@ -1327,9 +1325,9 @@ def start_sell_session(chat_id, acc_type):
         send_telegram_message(warning, chat_id)
         extra_notice = (
             "📌 Normal একাউন্ট বিক্রির বিশেষ নির্দেশনা:\n\n"
-            "Tmailor.com থেকে মেইল নিয়ে প্রতিটি মাদার অ্যাকাউন্টে মেইল অ্যাড করবেন এবং reuse link সংরক্ষণ করবেন। "
-            "মাদার অ্যাকাউন্টের মেইল reuse link প্রতিটি অ্যাড অ্যাকাউন্টের মেইল reuse link হিসেবে গণ্য হয়। "
-            "বিক্রয়ের সময় এই মেইল reuse link গুলোও দিতে হবে।"
+            "Tmailor.com থেকে মেইল নিয়ে প্রতিটি মাদার অ্যাকাউন্টে মেইল অ্যাড করবেন এবং access token সংরক্ষণ করবেন। "
+            "মাদার অ্যাকাউন্টের মেইল access token প্রতিটি অ্যাড অ্যাকাউন্টের মেইল access token হিসেবে গণ্য হয়। "
+            "বিক্রয়ের সময় এই মেইল access token গুলোও দিতে হবে।"
         )
         send_telegram_message(extra_notice, chat_id)
 
@@ -1370,17 +1368,17 @@ def process_sell_step(chat_id, text):
             session["step"] = "fa_keys"
             send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন (শুধু এন্টার দিন)।", chat_id)
         else:
-            session["step"] = "reuse_links"
-            send_telegram_message(f"📧 এখন **ইমেইল রিইউজ লিংক** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত রিইউজ লিংক দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
+            session["step"] = "access_tokens"
+            send_telegram_message(f"📧 এখন **ইমেইল এক্সেস টোকেন** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nপ্রতিটি অ্যাকাউন্টের জন্য tmailor.com থেকে প্রাপ্ত এক্সেস টোকেন দিন।\n\nআপনার ইউজারনেম সংখ্যা: {len(usernames)}", chat_id)
         return True
-    elif step == "reuse_links":
+    elif step == "access_tokens":
         raw_lines = text.splitlines()
-        reuse_links = [l.strip() for l in raw_lines]
+        access_tokens = [l.strip() for l in raw_lines]
         usernames = session["usernames"]
-        while len(reuse_links) > len(usernames) and reuse_links and reuse_links[-1] == '':
-            reuse_links.pop()
-        if len(reuse_links) != len(usernames):
-            send_telegram_message(f"❌ ইমেইল রিইউজ লিংক সংখ্যা ({len(reuse_links)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে লিংক দিন।", chat_id)
+        while len(access_tokens) > len(usernames) and access_tokens and access_tokens[-1] == '':
+            access_tokens.pop()
+        if len(access_tokens) != len(usernames):
+            send_telegram_message(f"❌ ইমেইল এক্সেস টোকেন সংখ্যা ({len(access_tokens)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না। প্রতিটি ইউজারনেমের জন্য একটি করে এক্সেস টোকেন দিন।", chat_id)
             return True
         accounts_list = []
         for i in range(len(usernames)):
@@ -1388,7 +1386,7 @@ def process_sell_step(chat_id, text):
                 "username": usernames[i],
                 "password": session["passwords"][i],
                 "fa_key": "",
-                "reuse_link": reuse_links[i]
+                "reuse_link": access_tokens[i]
             })
         sell_id = uuid.uuid4().hex[:10]
         sell_req = {"id": sell_id, "user_id": chat_id, "accounts": accounts_list, "status": "pending", "time": time.time(), "type": "normal"}
@@ -1516,13 +1514,12 @@ def admin_stock_cmd(chat_id):
                 if acc_type == "2fa":
                     line += f" | 2FA: {acc.get('fa_key', 'N/A')}"
                 else:
-                    reuse = acc.get("reuse_link", "")
-                    if len(reuse) > 50:
-                        reuse = reuse[:50] + "..."
-                    line += f" | Reuse Link: {reuse if reuse else 'N/A'}"
+                    access_token = acc.get("reuse_link", "")
+                    if len(access_token) > 50:
+                        access_token = access_token[:50] + "..."
+                    line += f" | Access Token: {access_token if access_token else 'N/A'}"
                 msg_lines.append(line)
         full_text = "\n".join(msg_lines)
-        # যদি এখনো দৈর্ঘ্য সীমা ছাড়ায়, তবে অটোমেটিক টুকরো করে পাঠানোর ব্যবস্থা
         if len(full_text) > 4096:
             parts = [full_text[i:i+4096] for i in range(0, len(full_text), 4096)]
             for part in parts:
@@ -1533,6 +1530,7 @@ def admin_stock_cmd(chat_id):
         logger.exception("Stock display error")
         send_telegram_message(f"⚠️ স্টক দেখাতে সমস্যা: {e}", ADMIN_CHAT_ID)
     return True
+
 def admin_deletestock_cmd(chat_id, arg):
     if str(chat_id) != ADMIN_CHAT_ID:
         return False
@@ -2210,7 +2208,7 @@ def handle_telegram_commands():
                                 with data_lock:
                                     subscribed_users.add(chat_id)
                                     save_subscribers()
-                                process_referral_on_start(chat_id, text)  # রেফারেল প্রক্রিয়া
+                                process_referral_on_start(chat_id, text)
                                 save_data_to_channel()
                                 send_telegram_message("✨ আমাদের বটে স্বাগতম! ✨", chat_id, reply_markup=get_main_keyboard(chat_id))
                                 continue

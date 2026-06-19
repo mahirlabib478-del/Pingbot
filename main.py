@@ -1813,7 +1813,59 @@ def admin_withdraw_requests_cmd(chat_id):
             lines.append(f"অনুমোদন: /approvewithdraw {r['id']}\nবাতিল: /rejectwithdraw {r['id']}\n")
         send_telegram_message("\n".join(lines), chat_id)
     return True
+# ================== ADMIN REFERRAL COMMANDS ==================
+def admin_referral_list(chat_id):
+    """সব রেফার্ড ইউজার দেখাবে"""
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        if not referrals:
+            send_telegram_message("❌ এখন পর্যন্ত কেউ রেফারেল ব্যবহার করেনি।", chat_id)
+            return True
+        lines = ["👥 রেফার্ড ইউজার তালিকা:\n"]
+        for invitee, referrer in referrals.items():
+            inv_name = user_info.get(str(invitee), f"ID:{invitee}")
+            ref_name = user_info.get(str(referrer), f"ID:{referrer}")
+            bonus = referral_bonuses.get(str(referrer), 0.0)
+            lines.append(
+                f"• {inv_name} ({invitee}) ➜ {ref_name} ({referrer}) | বোনাস: {bonus} টাকা"
+            )
+    send_telegram_message("\n".join(lines), chat_id)
+    return True
 
+def admin_non_referred_list(chat_id):
+    """যারা কারো রেফারেলে আসেনি তাদের তালিকা"""
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        all_users = set(subscribed_users)
+        referred = {str(k) for k in referrals.keys()}
+        non_referred = all_users - referred
+        if not non_referred:
+            send_telegram_message("✅ সব ইউজারই কোনো না কোনো রেফারেলের মাধ্যমে এসেছে।", chat_id)
+            return True
+        lines = ["🟢 নন-রেফার্ড ইউজার:\n"]
+        for uid in non_referred:
+            name = user_info.get(str(uid), f"ID:{uid}")
+            lines.append(f"• {name} ({uid})")
+    send_telegram_message("\n".join(lines), chat_id)
+    return True
+
+def admin_all_users_list(chat_id):
+    """সব ইউজার + রেফারেল স্ট্যাটাস"""
+    if str(chat_id) != ADMIN_CHAT_ID:
+        return False
+    with data_lock:
+        if not subscribed_users:
+            send_telegram_message("কোনো ইউজার নেই।", chat_id)
+            return True
+        lines = ["📋 সম্পূর্ণ ইউজার তালিকা:\n"]
+        for uid in subscribed_users:
+            name = user_info.get(str(uid), f"ID:{uid}")
+            ref = "রেফার্ড" if str(uid) in referrals else "নন-রেফার্ড"
+            lines.append(f"• {name} ({uid}) – {ref}")
+    send_telegram_message("\n".join(lines), chat_id)
+    return True
 # ================== CENTRAL ADMIN DISPATCHER ==================
 def handle_market_admin(chat_id, text):
     parts = text.split()
@@ -2194,6 +2246,15 @@ def handle_telegram_commands():
                                 continue
                             elif text == "/referral":
                                 handle_referral_command(chat_id)
+                                continue
+                            elif text == "/referrals":
+                                admin_referral_list(chat_id)
+                                continue
+                            elif text == "/nonreferred":
+                                admin_non_referred_list(chat_id)
+                                continue
+                            elif text == "/allusers":
+                                admin_all_users_list(chat_id)
                                 continue
                             else:
                                 send_telegram_message("❌ অজানা কমান্ড।", chat_id)

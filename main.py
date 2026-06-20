@@ -1286,22 +1286,24 @@ def handle_commands(chat_id, text, chat_type="private"):
             else: send_telegram_message("level1 or level2", chat_id)
         except: send_telegram_message("/setreferral level1/level2 <শতাংশ>", chat_id)
     elif cmd == "/setbkash" and chat_id == ADMIN_CHAT_ID:
-        if len(parts) > 1:
-            number = parts[1]
-            config["bkash_number"] = number
-            save_all()
-            send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
-        else: send_telegram_message("/setbkash <নম্বর>", chat_id)
-            elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
+    if len(parts) > 1:
+        number = parts[1]
+        config["bkash_number"] = number
+        save_all()
+        send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
+    else:
+        send_telegram_message("/setbkash <নম্বর>", chat_id)
+
+elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
     # ফরম্যাট: /addmother username password [2fa_key]
-        if len(parts) < 3:
+    if len(parts) < 3:
         send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
         return
-            username = parts[1]
-           password = parts[2]
-           fa_key = parts[3] if len(parts) > 3 else ""
-         with data_lock:
-           mother_accounts.append({
+    username = parts[1]
+    password = parts[2]
+    fa_key = parts[3] if len(parts) > 3 else ""
+    with data_lock:
+        mother_accounts.append({
             "username": username,
             "password": password,
             "fa_key": fa_key,

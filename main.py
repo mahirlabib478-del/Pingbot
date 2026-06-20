@@ -57,7 +57,7 @@ config = {
     "mother_price": 5.0,
     "referral_level1": 5.0,
     "referral_level2": 1.0,
-    "monthly_target": 5000.0,
+    "monthly_target": 5000.0,    # still used for display only, not global target
     "target_bonus": 2.0,
     "lock_2fa": False,
     "lock_cookies": False,
@@ -74,8 +74,8 @@ submission_sessions = {}          # user_id -> {"step","type","data"}
 admin_approve_sessions = {}       # admin -> {"sub_id","step"}
 admin_add_mother_session = {}     # admin -> {"step","data"}
 withdraw_sessions = {}            # user_id -> {"step","amount"}
-support_sessions = set()
-broadcast_sessions = {}           # admin -> type and temp
+support_sessions = set()          # set of chat_ids in support session
+broadcast_sessions = {}           # admin -> type
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -133,7 +133,6 @@ def load_all():
     config = loaded_config
     maintenance_mode = config.get("maintenance_mode", False)
 
-    # Load withdraw requests if present
     withdraw_requests = load_json("withdraw_requests.json", [])
 
 def save_all():
@@ -149,7 +148,6 @@ def save_all():
     save_json(LEADERBOARD_FILE, leaderboard)
     save_json("withdraw_requests.json", withdraw_requests)
     save_json(CONFIG_FILE, config)
-    # Also save channel backup
     save_data_to_channel()
 
 # ================== TELEGRAM HELPERS ==================
@@ -174,15 +172,21 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
     return None
 
 def send_telegram_document(file_bytes, filename, chat_id, caption=""):
+    """Returns the JSON response from Telegram if successful, otherwise None."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     try:
         files = {'document': (filename, file_bytes,
                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
         resp = requests.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
-        return resp.status_code == 200 and resp.json().get("ok", False)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok"):
+                return data
+        logger.error(f"Document send failed: {resp.text}")
+        return None
     except Exception as e:
         logger.error(f"Document send error: {e}")
-        return False
+        return None
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
@@ -321,7 +325,8 @@ def get_main_keyboard(chat_id):
         ["💼 একাউন্ট সাবমিট", "👤 প্রোফাইল"],
         ["👥 রেফারেল", "💰 ব্যালেন্স"],
         ["💸 উইথড্র", "📊 লিডারবোর্ড"],
-        ["🎁 ফ্রি মাদার একাউন্ট", "🛒 মাদার একাউন্ট কিনুন"]
+        ["🎁 ফ্রি মাদার একাউন্ট", "🛒 মাদার একাউন্ট কিনুন"],
+        ["📞 সাপোর্ট"]
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         kb.append(["🛠️ অ্যাডমিন প্যানেল"])
@@ -331,11 +336,11 @@ def admin_panel_keyboard():
     return {
         "keyboard": [
             ["📊 সাবমিটেড ফাইল", "⚙️ মূল্য নির্ধারণ"],
-            ["👥 রেফারেল বোনাস %", "💵 মাসিক টার্গেট"],
-            ["🔒 সাবমিট লক", "📢 ব্রডকাস্ট"],
-            ["➕ মাদার একাউন্ট যোগ", "📦 মাদার স্টক"],
-            ["💰 মাদার মূল্য সেট", "📋 ইউজার লিস্ট"],
-            ["✉️ ইউজারকে মেসেজ", "🔙 মূল মেনু"]
+            ["👥 রেফারেল বোনাস %", "🔒 সাবমিট লক"],
+            ["📢 ব্রডকাস্ট", "➕ মাদার একাউন্ট যোগ"],
+            ["📦 মাদার স্টক", "💰 মাদার মূল্য সেট"],
+            ["📋 ইউজার লিস্ট", "✉️ ইউজারকে মেসেজ"],
+            ["🔙 মূল মেনু"]
         ],
         "resize_keyboard": True
     }
@@ -402,8 +407,9 @@ def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
     type_label = "🍪 কুকিজ একাউন্ট" if acc_type == "cookies" else "🔐 2FA একাউন্ট"
     msg = (f"📋 {type_label} সাবমিট\n\nপ্রথমে আপনার **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি):\n\n"
-           "বাতিল করতে /cancel লিখুন।")
-    send_telegram_message(msg, chat_id)
+           "বাতিল করতে নিচের বাটনে চাপুন বা /cancel লিখুন।")
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=cancel_kb)
 
 def process_submission_step(chat_id, text, sender_username):
     if chat_id not in submission_sessions:
@@ -414,24 +420,25 @@ def process_submission_step(chat_id, text, sender_username):
         return True
     session = submission_sessions[chat_id]
     step = session["step"]
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "username":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
-            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
             return True
         session["usernames"] = lines
         session["step"] = "password"
-        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}", chat_id)
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}", chat_id, reply_markup=cancel_kb)
         return True
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["usernames"]
         if len(lines) != len(usernames):
-            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না।", chat_id)
+            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার ({len(usernames)}) সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
         session["passwords"] = lines
         session["step"] = "2fa"
-        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন।", chat_id)
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে একটি, ইউজারনেম এর ক্রম অনুযায়ী):\n\nযদি 2FA না থাকে, লাইন ফাঁকা রাখবেন।", chat_id, reply_markup=cancel_kb)
         return True
     elif step == "2fa":
         raw_lines = text.splitlines()
@@ -440,7 +447,7 @@ def process_submission_step(chat_id, text, sender_username):
         while len(twofa_list) > len(usernames) and twofa_list and twofa_list[-1] == '':
             twofa_list.pop()
         if len(twofa_list) != len(usernames):
-            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id)
+            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
         # Submit
         acc_type = session["type"]
@@ -449,9 +456,12 @@ def process_submission_step(chat_id, text, sender_username):
         excel_bytes = generate_submission_excel(usernames, session["passwords"], twofa_list, sender_username)
         caption = (f"📥 {user_info.get(chat_id, 'Unknown')} (@{sender_username}) "
                    f"একটি {type_label} একাউন্ট ফাইল সাবমিট করেছেন।\nমোট {len(usernames)} টি একাউন্ট।")
-        # Send to admin
+        # Send to admin and capture response
         resp = send_telegram_document(excel_bytes, filename, ADMIN_CHAT_ID, caption=caption)
         if resp:
+            result = resp["result"]
+            file_id = result["document"]["file_id"]
+            msg_id = result["message_id"]
             sub_id = uuid.uuid4().hex[:10]
             submission = {
                 "id": sub_id,
@@ -459,13 +469,13 @@ def process_submission_step(chat_id, text, sender_username):
                 "username": sender_username,
                 "type": acc_type,
                 "count": len(usernames),
-                "file_message_id": None,  # We'll not track message id now
+                "file_id": file_id,
+                "admin_message_id": msg_id,
                 "timestamp": time.time(),
                 "status": "pending"
             }
             submissions.append(submission)
             save_all()
-            # Update leaderboard
             update_user_submission_stats(chat_id, acc_type, len(usernames))
             send_telegram_message("✅ আপনার ফাইল সফলভাবে সাবমিট হয়েছে। অ্যাডমিন ২৪ ঘণ্টার মধ্যে রিপোর্ট দিবেন।", chat_id)
         else:
@@ -488,7 +498,7 @@ def update_user_submission_stats(user_id, acc_type, count):
 # ================== ADMIN APPROVAL ==================
 def admin_approve_start(sub_id):
     admin_approve_sessions[ADMIN_CHAT_ID] = {"sub_id": sub_id, "step": "ok_count"}
-    send_telegram_message("✅ কতটি আইডি ওকে হয়েছে? সংখ্যা লিখুন:", ADMIN_CHAT_ID)
+    send_telegram_message("✅ কতটি আইডি ওকে হয়েছে? সংখ্যা লিখুন:", ADMIN_CHAT_ID, reply_markup={"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]})
 
 def process_admin_approve_step(chat_id, text):
     if chat_id != ADMIN_CHAT_ID or ADMIN_CHAT_ID not in admin_approve_sessions:
@@ -591,7 +601,8 @@ def start_buy_mother(chat_id):
         send_telegram_message("❌ মাদার একাউন্ট স্টক খালি।", chat_id)
         return
     price = config["mother_price"]
-    send_telegram_message(f"🛒 মাদার একাউন্ট কিনুন\nপ্রতি পিস মূল্য: {price} টাকা\nআপনি কতটি কিনতে চান? (সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id)
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    send_telegram_message(f"🛒 মাদার একাউন্ট কিনুন\nপ্রতি পিস মূল্য: {price} টাকা\nআপনি কতটি কিনতে চান? (সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id, reply_markup=cancel_kb)
     submission_sessions[chat_id] = {"step": "mother_qty", "type": "mother_buy"}
 
 def process_mother_buy_step(chat_id, text):
@@ -650,7 +661,7 @@ def process_mother_buy_step(chat_id, text):
 # ================== ADMIN ADD MOTHER STOCK ==================
 def start_add_mother_stock(chat_id):
     admin_add_mother_session[chat_id] = {"step": "username"}
-    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_add_mother"}]]}
+    inline_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     send_telegram_message("➕ মাদার একাউন্ট যোগ করুন\nপ্রথমে ইউজারনেম লিস্ট দিন (প্রতি লাইনে একটি):", chat_id, reply_markup=inline_kb)
 
 def process_add_mother_step(chat_id, text):
@@ -662,24 +673,25 @@ def process_add_mother_step(chat_id, text):
         return True
     session = admin_add_mother_session[chat_id]
     step = session["step"]
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "username":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines:
-            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id)
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
             return True
         session["usernames"] = lines
         session["step"] = "password"
-        send_telegram_message(f"🔑 এখন পাসওয়ার্ড লিস্ট দিন ({len(lines)} টি):", chat_id)
+        send_telegram_message(f"🔑 এখন পাসওয়ার্ড লিস্ট দিন ({len(lines)} টি):", chat_id, reply_markup=cancel_kb)
         return True
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         usernames = session["usernames"]
         if len(lines) != len(usernames):
-            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id)
+            send_telegram_message(f"❌ পাসওয়ার্ড সংখ্যা ({len(lines)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
         session["passwords"] = lines
         session["step"] = "2fa"
-        send_telegram_message("🔐 2FA কী লিস্ট দিন (প্রতি লাইনে, ফাঁকা রাখা যাবে):", chat_id)
+        send_telegram_message("🔐 2FA কী লিস্ট দিন (প্রতি লাইনে, ফাঁকা রাখা যাবে):", chat_id, reply_markup=cancel_kb)
         return True
     elif step == "2fa":
         raw_lines = text.splitlines()
@@ -688,7 +700,7 @@ def process_add_mother_step(chat_id, text):
         while len(twofa_list) > len(usernames) and twofa_list and twofa_list[-1] == '':
             twofa_list.pop()
         if len(twofa_list) != len(usernames):
-            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id)
+            send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
         with data_lock:
             for i in range(len(usernames)):
@@ -753,7 +765,8 @@ def show_leaderboard(chat_id):
 # ================== WITHDRAW ==================
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
-    send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id)
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id, reply_markup=cancel_kb)
 
 def process_withdraw_step(chat_id, text):
     if chat_id not in withdraw_sessions:
@@ -764,13 +777,14 @@ def process_withdraw_step(chat_id, text):
         return True
     session = withdraw_sessions[chat_id]
     step = session["step"]
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "amount":
         try:
             amount = float(text.strip())
             if amount <= 0:
                 raise ValueError
         except:
-            send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id)
+            send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id, reply_markup=cancel_kb)
             return True
         bal = user_balances.get(chat_id, 0)
         if amount > bal:
@@ -779,12 +793,12 @@ def process_withdraw_step(chat_id, text):
             return True
         session["amount"] = amount
         session["step"] = "bkash"
-        send_telegram_message("📞 আপনার বিকাশ নম্বর দিন:", chat_id)
+        send_telegram_message("📞 আপনার বিকাশ নম্বর দিন:", chat_id, reply_markup=cancel_kb)
         return True
     elif step == "bkash":
         bkash = text.strip()
         if not bkash:
-            send_telegram_message("⚠️ বিকাশ নম্বর খালি রাখা যাবে না।", chat_id)
+            send_telegram_message("⚠️ বিকাশ নম্বর খালি রাখা যাবে না।", chat_id, reply_markup=cancel_kb)
             return True
         amount = session["amount"]
         w_id = uuid.uuid4().hex[:10]
@@ -799,6 +813,34 @@ def process_withdraw_step(chat_id, text):
         send_telegram_message("🔝", chat_id, reply_markup=get_main_keyboard(chat_id))
         return True
     return False
+
+# ================== SUPPORT ==================
+def start_support(chat_id):
+    support_sessions.add(chat_id)
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    send_telegram_message("📞 আপনার মেসেজ, ছবি, ফাইল বা ভয়েস পাঠান। অ্যাডমিন সরাসরি দেখতে পাবেন।\nবাতিল করতে নিচের বাটনে চাপুন।", chat_id, reply_markup=cancel_kb)
+
+def forward_support_message(chat_id, msg):
+    sender = user_info.get(chat_id, chat_id)
+    # Forward all types to admin
+    if "text" in msg:
+        text = msg["text"]
+        send_telegram_message(f"📩 সাপোর্ট মেসেজ\nইউজার: {sender} ({chat_id})\n\n{text}", ADMIN_CHAT_ID)
+    elif "photo" in msg:
+        file_id = msg["photo"][-1]["file_id"]
+        caption = msg.get("caption", "")
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                      json={"chat_id": ADMIN_CHAT_ID, "photo": file_id, "caption": f"📩 সাপোর্ট ছবি\nইউজার: {sender} ({chat_id})\n{caption}"})
+    elif "document" in msg:
+        file_id = msg["document"]["file_id"]
+        caption = msg.get("caption", "")
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                      json={"chat_id": ADMIN_CHAT_ID, "document": file_id, "caption": f"📩 সাপোর্ট ফাইল\nইউজার: {sender} ({chat_id})\n{caption}"})
+    elif "voice" in msg:
+        file_id = msg["voice"]["file_id"]
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                      json={"chat_id": ADMIN_CHAT_ID, "voice": file_id, "caption": f"📩 সাপোর্ট ভয়েস\nইউজার: {sender} ({chat_id})"})
+    send_telegram_message("✅ আপনার মেসেজ পাঠানো হয়েছে।", chat_id)
 
 # ================== ADMIN BROADCAST ==================
 def admin_broadcast_prompt(chat_id):
@@ -837,6 +879,21 @@ def handle_telegram_commands():
                         user_info[chat_id] = sender_username
                         answer_callback_query(cbid)
 
+                        # Generic cancel session
+                        if data == "cancel_session":
+                            cancelled = False
+                            for sess_dict in [submission_sessions, withdraw_sessions, admin_add_mother_session, admin_approve_sessions, broadcast_sessions]:
+                                if chat_id in sess_dict:
+                                    del sess_dict[chat_id]
+                                    cancelled = True
+                                    break
+                            if chat_id in support_sessions:
+                                support_sessions.discard(chat_id)
+                                cancelled = True
+                            if cancelled:
+                                send_telegram_message("❌ প্রক্রিয়া বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id) if chat_id != ADMIN_CHAT_ID else admin_panel_keyboard() if chat_id == ADMIN_CHAT_ID else get_main_keyboard(chat_id))
+                            continue
+
                         # Account submit category
                         if data == "sub_cookies":
                             if config.get("lock_cookies"):
@@ -859,16 +916,27 @@ def handle_telegram_commands():
                             save_all()
                             send_telegram_message(f"কুকিজ সাবমিট {'🔒 বন্ধ' if config['lock_cookies'] else '🔓 চালু'} করা হয়েছে।", chat_id)
 
-                        # Cancel mother stock add
-                        elif data == "cancel_add_mother" and chat_id == ADMIN_CHAT_ID:
-                            if chat_id in admin_add_mother_session:
-                                del admin_add_mother_session[chat_id]
-                                send_telegram_message("❌ মাদার একাউন্ট যোগ বাতিল করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+                        # View submission file (admin)
+                        elif data.startswith("getfile_") and chat_id == ADMIN_CHAT_ID:
+                            sub_id = data[8:]
+                            with data_lock:
+                                sub = next((s for s in submissions if s["id"] == sub_id), None)
+                            if sub and "file_id" in sub:
+                                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                             json={"chat_id": ADMIN_CHAT_ID, "document": sub["file_id"]})
+                            else:
+                                send_telegram_message("❌ ফাইল পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
+                        # Approve submission from button
+                        elif data.startswith("approve_") and chat_id == ADMIN_CHAT_ID:
+                            sub_id = data[8:]
+                            admin_approve_start(sub_id)
 
                         # User monthly target set
                         elif data == "set_target":
                             submission_sessions[chat_id] = {"step": "target_amount"}
-                            send_telegram_message("🎯 আপনার মাসিক ইনকাম টার্গেট কত টাকা সেট করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id)
+                            cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+                            send_telegram_message("🎯 আপনার মাসিক ইনকাম টার্গেট কত টাকা সেট করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id, reply_markup=cancel_kb)
 
                         # Broadcast callbacks (admin only)
                         elif data.startswith("bc_") and chat_id == ADMIN_CHAT_ID:
@@ -898,6 +966,11 @@ def handle_telegram_commands():
                         # Maintenance mode check
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। কিছুক্ষণ পর চেষ্টা করুন।", chat_id)
+                            continue
+
+                        # Support session: forward any message to admin
+                        if chat_id in support_sessions:
+                            forward_support_message(chat_id, msg)
                             continue
 
                         # Admin approval session
@@ -951,13 +1024,11 @@ def handle_telegram_commands():
                         # Admin broadcast session (capture text/photo etc.)
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in broadcast_sessions:
                             btype = broadcast_sessions[ADMIN_CHAT_ID]["type"]
-                            # For text broadcast
                             if btype == "text" and text:
                                 broadcast_message(f"📢 অ্যাডমিন থেকে:\n\n{text}")
                                 send_telegram_message("✅ টেক্সট ব্রডকাস্ট সম্পন্ন হয়েছে।", ADMIN_CHAT_ID)
                                 del broadcast_sessions[ADMIN_CHAT_ID]
                             elif btype in ["photo", "document", "voice"]:
-                                # Forward to all subscribed users
                                 if btype == "photo" and "photo" in msg:
                                     file_id = msg["photo"][-1]["file_id"]
                                     caption = msg.get("caption", "")
@@ -965,8 +1036,7 @@ def handle_telegram_commands():
                                         try:
                                             requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
                                                           json={"chat_id": uid, "photo": file_id, "caption": caption}, timeout=10)
-                                        except:
-                                            pass
+                                        except: pass
                                         time.sleep(0.05)
                                     send_telegram_message("✅ ছবি ব্রডকাস্ট সম্পন্ন।", ADMIN_CHAT_ID)
                                     del broadcast_sessions[ADMIN_CHAT_ID]
@@ -977,8 +1047,7 @@ def handle_telegram_commands():
                                         try:
                                             requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                                                           json={"chat_id": uid, "document": file_id, "caption": caption}, timeout=10)
-                                        except:
-                                            pass
+                                        except: pass
                                         time.sleep(0.05)
                                     send_telegram_message("✅ ফাইল ব্রডকাস্ট সম্পন্ন।", ADMIN_CHAT_ID)
                                     del broadcast_sessions[ADMIN_CHAT_ID]
@@ -988,8 +1057,7 @@ def handle_telegram_commands():
                                         try:
                                             requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
                                                           json={"chat_id": uid, "voice": file_id}, timeout=10)
-                                        except:
-                                            pass
+                                        except: pass
                                         time.sleep(0.05)
                                     send_telegram_message("✅ ভয়েস ব্রডকাস্ট সম্পন্ন।", ADMIN_CHAT_ID)
                                     del broadcast_sessions[ADMIN_CHAT_ID]
@@ -1028,6 +1096,9 @@ def handle_telegram_commands():
                         elif text == "🛒 মাদার একাউন্ট কিনুন":
                             start_buy_mother(chat_id)
                             continue
+                        elif text == "📞 সাপোর্ট":
+                            start_support(chat_id)
+                            continue
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and str(chat_id) == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                             continue
@@ -1036,20 +1107,23 @@ def handle_telegram_commands():
                             if not pending:
                                 send_telegram_message("কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
                             else:
-                                msg_lines = ["📥 পেন্ডিং সাবমিশন:\n"]
                                 for s in pending:
                                     type_label = "কুকিজ" if s["type"] == "cookies" else "2FA"
-                                    msg_lines.append(f"আইডি: {s['id']} | {type_label} | {s['username']} | {s['count']} পিস\n/approve_{s['id']}")
-                                send_telegram_message("\n".join(msg_lines), chat_id)
+                                    buttons = [
+                                        [{"text": "📄 ফাইল দেখুন", "callback_data": f"getfile_{s['id']}"}],
+                                        [{"text": "✅ অ্যাপ্রুভ", "callback_data": f"approve_{s['id']}"}]
+                                    ]
+                                    send_telegram_message(
+                                        f"📥 সাবমিশন {s['id']}\nটাইপ: {type_label}\nইউজার: {s['username']}\nএকাউন্ট: {s['count']} টি",
+                                        chat_id,
+                                        reply_markup={"inline_keyboard": buttons}
+                                    )
                             continue
                         elif text == "⚙️ মূল্য নির্ধারণ" and str(chat_id) == ADMIN_CHAT_ID:
                             send_telegram_message("মূল্য নির্ধারণ করতে কমান্ড:\n/setprice 2fa <মূল্য>\n/setprice cookies <মূল্য>", chat_id)
                             continue
                         elif text == "👥 রেফারেল বোনাস %" and str(chat_id) == ADMIN_CHAT_ID:
                             send_telegram_message("/setreferral level1 <শতাংশ> or level2 <শতাংশ>", chat_id)
-                            continue
-                        elif text == "💵 মাসিক টার্গেট" and str(chat_id) == ADMIN_CHAT_ID:
-                            send_telegram_message("/settarget <টাকা>", chat_id)
                             continue
                         elif text == "🔒 সাবমিট লক" and str(chat_id) == ADMIN_CHAT_ID:
                             kb = {"inline_keyboard": [
@@ -1163,18 +1237,6 @@ def handle_commands(chat_id, text, sender_username):
             send_telegram_message("level1 or level2", chat_id); return
         save_all()
         send_telegram_message(f"✅ রেফারেল {parts[1]} বোনাস {perc}% সেট হয়েছে।", chat_id)
-    elif cmd == "/settarget" and str(chat_id) == ADMIN_CHAT_ID:
-        if len(parts) < 2: send_telegram_message("/settarget <amount>", chat_id); return
-        try:
-            target = float(parts[1])
-        except:
-            send_telegram_message("সঠিক টাকার পরিমাণ দিন।", chat_id); return
-        config["monthly_target"] = target
-        save_all()
-        send_telegram_message(f"✅ মাসিক টার্গেট {target} টাকা নির্ধারণ করা হয়েছে।", chat_id)
-    elif cmd.startswith("/approve_") and str(chat_id) == ADMIN_CHAT_ID:
-        sub_id = cmd[9:]
-        admin_approve_start(sub_id)
     elif cmd == "/approvewithdraw" and str(chat_id) == ADMIN_CHAT_ID:
         if len(parts) < 2: send_telegram_message("/approvewithdraw <id>", chat_id); return
         w_id = parts[1]

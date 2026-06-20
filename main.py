@@ -481,7 +481,7 @@ def process_admin_approve_step(chat_id, text):
             if sub["id"] == sub_id and sub["status"] == "pending":
                 user_id = sub["user_id"]
                 acc_type = sub["type"]
-                # ---------- নতুন চেক ----------
+                # ---------- চেক: সাবমিটেড এর বেশি ওকে না ----------
                 if user_id in leaderboard:
                     total_sub = leaderboard[user_id].get(f"total_submitted_{acc_type}", 0)
                     already_ok = leaderboard[user_id].get(f"total_ok_{acc_type}", 0)
@@ -491,7 +491,7 @@ def process_admin_approve_step(chat_id, text):
                             f"❌ সর্বোচ্চ {max_possible} টি আইডি ওকে করা যাবে। (সাবমিট: {total_sub}, ইতিমধ্যে ওকে: {already_ok})",
                             ADMIN_CHAT_ID)
                         return True
-                # -------------------------------
+                # ------------------------------------------------
                 sub["status"] = "approved"
                 sub["ok_count"] = ok_count
                 price = config["price_2fa"] if acc_type == "2fa" else config["price_cookies"]
@@ -854,14 +854,20 @@ def handle_telegram_commands():
                         answer_callback_query(cb["id"])
 
                         if data == "cancel_session":
+                            cancelled = False
                             for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, admin_add_mother_session, admin_approve_sessions, broadcast_sessions]:
                                 if chat_id in sess_dict:
                                     del sess_dict[chat_id]
+                                    cancelled = True
                                     send_telegram_message("❌ প্রক্রিয়া বাতিল করা হয়েছে।", chat_id,
                                                          reply_markup=get_main_keyboard(chat_id) if chat_id != ADMIN_CHAT_ID else admin_panel_keyboard())
                                     break
                             if chat_id in support_sessions:
                                 support_sessions.discard(chat_id)
+                                cancelled = True
+                                send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                            if not cancelled:
+                                answer_callback_query(cb["id"], text="কোনো চলমান প্রক্রিয়া নেই।")
                             continue
 
                         if data == "sub_cookies":
@@ -936,6 +942,12 @@ def handle_telegram_commands():
                                 send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
+                        # -------- সাপোর্টের ভিতর /cancel বা /start লিখলে সাপোর্ট বন্ধ হবে --------
+                        if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
+                            support_sessions.discard(chat_id)
+                            send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+                            continue
+
                         if chat_id in support_sessions:
                             forward_support_message(chat_id, msg)
                             continue
@@ -1004,7 +1016,6 @@ def handle_telegram_commands():
                             continue
 
                         # ====== বাটন হ্যান্ডলিং (প্রাইভেট ও গ্রুপ) ======
-                        # কিছু বাটন শুধু প্রাইভেট চ্যাটে কাজ করবে
                         if chat_type != "private" and text in [
                             "💼 একাউন্ট সাবমিট", "👤 প্রোফাইল", "💰 ব্যালেন্স",
                             "💳 ডিপোজিট", "💸 উইথড্র", "🎁 ফ্রি মাদার একাউন্ট",

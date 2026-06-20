@@ -1308,9 +1308,9 @@ def handle_commands(chat_id, text, chat_type="private"):
                 "fa_key": fa_key,
                 "assigned_to": None,
                 "assigned_at": None
-           })
-           save_all()
-       send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
+            })
+            save_all()
+        send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
 
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:

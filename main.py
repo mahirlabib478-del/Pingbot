@@ -479,7 +479,6 @@ def get_target_progress(uid):
 
 # ================== PROFILE HELPERS ==================
 def get_profile_text(uid):
-    """Returns the profile message string for a given user ID."""
     with data_lock:
         init_leaderboard_entry(uid)
         bal = user_balances.get(uid, 0)
@@ -974,7 +973,6 @@ def show_free_mother_list_refresh(chat_id, message_id, page=None):
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
-    """Shows profile to the user himself (used by profile button)."""
     try:
         msg = get_profile_text(chat_id)
         inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
@@ -1226,7 +1224,6 @@ def handle_telegram_commands():
                             show_free_mother_list(chat_id, page=page, message_id=message_id)
                         elif data == "close_freemotherlist" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("🎁 ফ্রি মাদার তালিকা বন্ধ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
-                        # ---------- FIXED admin profile view ----------
                         elif data.startswith("admin_profile_") and chat_id == ADMIN_CHAT_ID:
                             target = data[14:]
                             msg = get_profile_text(target)
@@ -1457,9 +1454,15 @@ def handle_telegram_commands():
                             if not subscribed_users:
                                 send_telegram_message("কোনো ইউজার নেই।", chat_id)
                             else:
+                                lines = ["📋 সাবস্ক্রাইবড ইউজার:\n"]
                                 for uid in subscribed_users:
-                                    kb = {"inline_keyboard": [[{"text": "👤 প্রোফাইল দেখুন", "callback_data": f"admin_profile_{uid}"}]]}
-                                    send_telegram_message(f"• {user_info.get(uid, '?')} ({uid})", chat_id, reply_markup=kb)
+                                    line = f"• {user_info.get(uid, '?')} ({uid})"
+                                    if len("\n".join(lines)) + len(line) + 1 > 4000:
+                                        send_telegram_message("\n".join(lines), chat_id)
+                                        lines = ["(চলমান)...\n"]
+                                    lines.append(line)
+                                if len(lines) > 1:
+                                    send_telegram_message("\n".join(lines), chat_id)
                         elif text == "✉️ ইউজারকে মেসেজ" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("/send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
                         elif text == "📁 ব্যাকআপ" and chat_id == ADMIN_CHAT_ID:
@@ -1657,7 +1660,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         else:
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherstocklist দিয়ে দেখুন।", chat_id)
 
-    # ---------- FIXED /profile command ----------
     elif cmd == "/profile" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2 or not parts[1].isdigit():
             send_telegram_message("/profile <user_id>", chat_id)

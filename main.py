@@ -216,8 +216,6 @@ def answer_callback_query(callback_id, text=None):
         logger.error(f"Callback answer error: {e}")
 
 # ================== CHANNEL BACKUP ==================
-# ... (keep existing backup functions) ...
-# (I'll include them here for completeness)
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID: return
@@ -438,43 +436,50 @@ def add_ok(user_id, acc_type, count, amount):
         save_all()
 
 def get_target_progress(uid):
-    """Returns detailed target progress or None."""
     entry = leaderboard.get(uid, {})
     target = entry.get("monthly_target")
     if not target:
         return None
-    now = datetime.datetime.now()
-    # Calculate remaining days (excluding today)
-    next_month = now.replace(day=28) + datetime.timedelta(days=4)
-    last_day_of_month = next_month - datetime.timedelta(days=next_month.day)
-    days_left = (last_day_of_month - now.date()).days + 1
-    if days_left < 1:
-        days_left = 1
-    current_income = entry.get("current_month_income", 0.0)
-    remaining = max(0, target - current_income)
-    daily_needed = remaining / days_left if days_left > 0 else remaining
+    try:
+        now = datetime.datetime.now()
+        # পরের মাসের প্রথম দিন বের করা (নিরাপদ পদ্ধতি)
+        next_month = now.replace(day=28) + datetime.timedelta(days=4)
+        last_day = next_month - datetime.timedelta(days=next_month.day)
+        # .date() ব্যবহার করে date অবজেক্টে রূপান্তর (TypeError ফিক্স)
+        days_left = (last_day.date() - now.date()).days + 1
+        if days_left < 1:
+            days_left = 1
 
-    price_2fa = config["price_2fa"]
-    price_cookies = config["price_cookies"]
-    today_income = entry.get("today_ok_2fa",0)*price_2fa + entry.get("today_ok_cookies",0)*price_cookies
+        price_2fa = config.get("price_2fa", 3.0)
+        price_cookies = config.get("price_cookies", 3.5)
 
-    return {
-        "target": target,
-        "current_income": current_income,
-        "remaining": remaining,
-        "days_left": days_left,
-        "daily_income_needed": daily_needed,
-        "daily_2fa_needed": daily_needed / price_2fa if price_2fa > 0 else 0,
-        "daily_cookies_needed": daily_needed / price_cookies if price_cookies > 0 else 0,
-        "today_ok_2fa": entry.get("today_ok_2fa", 0),
-        "today_ok_cookies": entry.get("today_ok_cookies", 0),
-        "today_income": today_income,
-        "price_2fa": price_2fa,
-        "price_cookies": price_cookies
-    }
+        current_income = entry.get("current_month_income", 0.0)
+        remaining = max(0, target - current_income)
+        daily_needed = remaining / days_left if days_left > 0 else remaining
+
+        today_2fa = entry.get("today_ok_2fa", 0)
+        today_cookies = entry.get("today_ok_cookies", 0)
+        today_income = today_2fa * price_2fa + today_cookies * price_cookies
+
+        return {
+            "target": target,
+            "current_income": current_income,
+            "remaining": remaining,
+            "days_left": days_left,
+            "daily_income_needed": daily_needed,
+            "daily_2fa_needed": daily_needed / price_2fa if price_2fa > 0 else 0,
+            "daily_cookies_needed": daily_needed / price_cookies if price_cookies > 0 else 0,
+            "today_ok_2fa": today_2fa,
+            "today_ok_cookies": today_cookies,
+            "today_income": today_income,
+            "price_2fa": price_2fa,
+            "price_cookies": price_cookies
+        }
+    except Exception as e:
+        logger.error(f"get_target_progress error for {uid}: {e}")
+        return None
 
 # ================== SUBMISSION SYSTEM ==================
-# (keep all submission functions unchanged) ...
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
     type_label = "🍪 কুকিজ একাউন্ট" if acc_type == "cookies" else "🔐 2FA একাউন্ট"
@@ -760,36 +765,43 @@ def process_add_mother_step(chat_id, text):
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
-    with data_lock:
-        init_leaderboard_entry(chat_id)
-        bal = user_balances.get(chat_id, 0)
-        stats = leaderboard[chat_id]
-        target_progress = get_target_progress(chat_id)
-    msg = (
-        f"👤 আপনার প্রোফাইল\n\n"
-        f"💰 মোট ইনকাম: {stats.get('total_income',0)} টাকা\n"
-        f"📊 ব্যালেন্স: {bal} টাকা\n"
-        f"📅 গত মাসের আয়: {stats.get('last_month_income',0)} টাকা\n\n"
-        f"📤 সাবমিট:\n"
-        f"  🔐 2FA: {stats.get('total_submitted_2fa',0)} টি (ওকে: {stats.get('total_ok_2fa',0)})\n"
-        f"  🍪 কুকিজ: {stats.get('total_submitted_cookies',0)} টি (ওকে: {stats.get('total_ok_cookies',0)})\n"
-    )
-    if target_progress:
-        msg += (
-            f"------------------\n"
-            f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
-            f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
-            f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
-            f"📆 আজকের আয়: {target_progress['today_income']} টাকা "
-            f"(2FA: {target_progress['today_ok_2fa']} টি, কুকিজ: {target_progress['today_ok_cookies']} টি)\n"
-            f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
-            f"   ↳ 2FA দিয়ে: {target_progress['daily_2fa_needed']:.1f} টি ({target_progress['price_2fa']} টাকা)\n"
-            f"   ↳ কুকিজ দিয়ে: {target_progress['daily_cookies_needed']:.1f} টি ({target_progress['price_cookies']} টাকা)\n"
+    try:
+        with data_lock:
+            init_leaderboard_entry(chat_id)
+            bal = user_balances.get(chat_id, 0)
+            stats = leaderboard.get(chat_id, {})
+            target_progress = get_target_progress(chat_id)
+
+        msg = (
+            f"👤 আপনার প্রোফাইল\n\n"
+            f"💰 মোট ইনকাম: {stats.get('total_income', 0)} টাকা\n"
+            f"📊 ব্যালেন্স: {bal} টাকা\n"
+            f"📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
+            f"📤 সাবমিট:\n"
+            f"  🔐 2FA: {stats.get('total_submitted_2fa', 0)} টি (ওকে: {stats.get('total_ok_2fa', 0)})\n"
+            f"  🍪 কুকিজ: {stats.get('total_submitted_cookies', 0)} টি (ওকে: {stats.get('total_ok_cookies', 0)})\n"
         )
-    else:
-        msg += "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
-    inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
-    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
+
+        if target_progress:
+            msg += (
+                f"------------------\n"
+                f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
+                f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
+                f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
+                f"📆 আজকের আয়: {target_progress['today_income']} টাকা "
+                f"(2FA: {target_progress['today_ok_2fa']} টি, কুকিজ: {target_progress['today_ok_cookies']} টি)\n"
+                f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
+                f"   ↳ 2FA দিয়ে: {target_progress['daily_2fa_needed']:.1f} টি ({target_progress['price_2fa']} টাকা)\n"
+                f"   ↳ কুকিজ দিয়ে: {target_progress['daily_cookies_needed']:.1f} টি ({target_progress['price_cookies']} টাকা)\n"
+            )
+        else:
+            msg += "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
+
+        inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
+        send_telegram_message(msg, chat_id, reply_markup=inline_kb)
+    except Exception as e:
+        logger.error(f"show_profile error for {chat_id}: {e}")
+        send_telegram_message("⚠️ প্রোফাইল দেখাতে সমস্যা হয়েছে। পরে চেষ্টা করুন।", chat_id)
 
 def show_leaderboard(chat_id):
     with data_lock:
@@ -802,7 +814,6 @@ def show_leaderboard(chat_id):
     send_telegram_message(msg, chat_id)
 
 # ================== WITHDRAW ==================
-# (keep all withdraw functions unchanged) ...
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
     send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id,
@@ -849,7 +860,6 @@ def process_withdraw_step(chat_id, text):
         return True
 
 # ================== DEPOSIT SYSTEM ==================
-# ... (keep deposit functions unchanged) ...
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "সেট করা হয়নি")
@@ -905,7 +915,6 @@ def process_deposit_step(chat_id, text):
     return False
 
 # ================== SUPPORT ==================
-# ... (keep support functions unchanged) ...
 def start_support(chat_id):
     support_sessions.add(chat_id)
     send_telegram_message("📞 আপনার মেসেজ, ছবি, ফাইল বা ভয়েস পাঠান। অ্যাডমিন সরাসরি দেখতে পাবেন।\nবাতিল করতে নিচের বাটনে চাপুন।",
@@ -1155,7 +1164,6 @@ def handle_telegram_commands():
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
-                        # ... (rest of admin panel buttons unchanged) ...
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
                             pending = [s for s in submissions if s["status"]=="pending"]
                             if not pending:

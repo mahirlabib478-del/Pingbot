@@ -44,14 +44,14 @@ app = Flask(__name__)
 # ================== GLOBALS ==================
 last_update_id = None
 subscribed_users = set()
-user_info = {}                    # chat_id -> username/firstname
-mother_accounts = []              # free mother accounts (old)
-user_last_request = {}            # cooldowns for free mother account
+user_info = {}
+mother_accounts = []
+user_last_request = {}
 maintenance_mode = False
 
-user_balances = {}                # chat_id -> balance (float)
-submissions = []                  # list of submission dicts
-mother_stock = []                 # buyable mother accounts
+user_balances = {}
+submissions = []
+mother_stock = []
 config = {
     "price_cookies": 3.5,
     "price_2fa": 3.0,
@@ -66,8 +66,8 @@ config = {
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False
 }
-referrals = {}                    # invitee -> referrer
-referral_bonuses = {}             # referrer -> total bonus earned
+referrals = {}
+referral_bonuses = {}
 leaderboard = {}
 withdraw_requests = []
 deposit_requests = []
@@ -76,7 +76,7 @@ deposit_requests = []
 submission_sessions = {}
 admin_approve_sessions = {}
 admin_add_mother_session = {}
-admin_add_mother_bulk_session = {}  # new: bulk free mother add
+admin_add_mother_bulk_session = {}
 withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
@@ -85,6 +85,9 @@ broadcast_sessions = {}
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 last_backup_message_id = None
+
+last_morning_sent_date = None
+last_evening_sent_date = None
 
 # ================== FILE I/O ==================
 def load_json(filename, default):
@@ -554,6 +557,9 @@ def update_user_submission_stats(user_id, acc_type, count):
 
 # ================== ADMIN APPROVAL ==================
 def admin_approve_start(sub_id):
+    if ADMIN_CHAT_ID in admin_approve_sessions:
+        send_telegram_message("⚠️ আগের অ্যাপ্রুভ প্রক্রিয়া শেষ করুন বা বাতিল করুন।", ADMIN_CHAT_ID)
+        return
     admin_approve_sessions[ADMIN_CHAT_ID] = {"sub_id": sub_id, "step": "ok_count"}
     send_telegram_message("✅ কতটি আইডি ওকে হয়েছে? সংখ্যা লিখুন:", ADMIN_CHAT_ID,
                          reply_markup={"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]})
@@ -816,23 +822,120 @@ def process_add_mother_bulk_step(chat_id, text):
         return True
     return False
 
-# ================== MOTHER STOCK DETAIL & DELETE ==================
-def show_mother_stock_detail(chat_id):
+# ================== MOTHER STOCK DETAIL & DELETE (PAGINATED + REFRESH) ==================
+def show_mother_stock_detail(chat_id, page=0, message_id=None):
     with data_lock:
         available = [(i, acc) for i, acc in enumerate(mother_stock) if not acc.get("sold")]
     if not available:
         send_telegram_message("📦 মাদার স্টক খালি।", chat_id)
         return
 
-    lines = ["📦 **পেইড মাদার স্টক (উপলব্ধ):**\n"]
+    items_per_page = 10
+    total_pages = (len(available) + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+    start = page * items_per_page
+    end = start + items_per_page
+    page_items = available[start:end]
+
+    lines = [f"📦 **পেইড মাদার স্টক (পৃষ্ঠা {page+1}/{total_pages}):**\n"]
     keyboard_rows = []
-    for orig_idx, acc in available:
+    for orig_idx, acc in page_items:
         line = f"{orig_idx+1}. 👤 {acc['username']} | 🔑 {acc['password']} | 🔐 {acc.get('fa_key','')}"
         lines.append(line)
         keyboard_rows.append([{"text": f"🗑️ #{orig_idx+1}", "callback_data": f"delmotherstock_{orig_idx}"}])
 
-    keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "cancel_session"}])
-    send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": keyboard_rows})
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"motherstock_page_{page-1}"})
+    if page < total_pages - 1:
+        nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"motherstock_page_{page+1}"})
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+
+    keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_motherstock"}])
+
+    if message_id:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": keyboard_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": keyboard_rows})
+
+def show_mother_stock_detail_refresh(chat_id, message_id, page=None):
+    with data_lock:
+        available = [(i, acc) for i, acc in enumerate(mother_stock) if not acc.get("sold")]
+    if not available:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+                "chat_id": chat_id, "message_id": message_id,
+                "text": "📦 মাদার স্টক খালি।",
+            })
+        except: pass
+        return
+
+    items_per_page = 10
+    total_pages = (len(available) + items_per_page - 1) // items_per_page
+    if page is None or page >= total_pages:
+        page = total_pages - 1
+    show_mother_stock_detail(chat_id, page=page, message_id=message_id)
+
+# ================== FREE MOTHER LIST (PAGINATED + INLINE DELETE) ==================
+def show_free_mother_list(chat_id, page=0, message_id=None):
+    with data_lock:
+        if not mother_accounts:
+            send_telegram_message("🎁 ফ্রি মাদার একাউন্ট তালিকা খালি।", chat_id)
+            return
+        items_per_page = 10
+        total_pages = (len(mother_accounts) + items_per_page - 1) // items_per_page
+        page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+        start = page * items_per_page
+        end = start + items_per_page
+        page_items = list(enumerate(mother_accounts, 1))[start:end]
+
+        lines = [f"🎁 ফ্রি মাদার একাউন্ট তালিকা (পৃষ্ঠা {page+1}/{total_pages}):\n"]
+        keyboard_rows = []
+        for idx, acc in page_items:
+            assigned = "কেহ না" if not acc.get("assigned_to") else acc["assigned_to"]
+            lines.append(f"{idx}. 👤 {acc['username']} | 🔑 {acc['password']} | 🔐 {acc.get('fa_key','')} | বরাদ্দ: {assigned}")
+            # inline delete button (index-1 to match array)
+            keyboard_rows.append([{"text": f"🗑️ #{idx}", "callback_data": f"delfreemother_{idx-1}"}])
+
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"freemother_page_{page-1}"})
+        if page < total_pages - 1:
+            nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"freemother_page_{page+1}"})
+        if nav_buttons:
+            keyboard_rows.append(nav_buttons)
+        keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_freemotherlist"}])
+
+    if message_id:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": keyboard_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": keyboard_rows})
+
+def show_free_mother_list_refresh(chat_id, message_id, page=None):
+    with data_lock:
+        if not mother_accounts:
+            try:
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+                    "chat_id": chat_id, "message_id": message_id,
+                    "text": "🎁 ফ্রি মাদার একাউন্ট তালিকা খালি।",
+                })
+            except: pass
+            return
+        items_per_page = 10
+        total_pages = (len(mother_accounts) + items_per_page - 1) // items_per_page
+        if page is None or page >= total_pages:
+            page = total_pages - 1
+        show_free_mother_list(chat_id, page=page, message_id=message_id)
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
@@ -1091,9 +1194,35 @@ def handle_telegram_commands():
                                 if 0 <= idx < len(mother_stock):
                                     deleted = mother_stock.pop(idx)
                                     save_all()
+                                    show_mother_stock_detail_refresh(chat_id, cb["message"]["message_id"])
                                     send_telegram_message(f"🗑️ মাদার স্টক থেকে {deleted['username']} মুছে ফেলা হয়েছে।", ADMIN_CHAT_ID)
                                 else:
                                     send_telegram_message("❌ আইটেম পাওয়া যায়নি।", ADMIN_CHAT_ID)
+                        elif data.startswith("delfreemother_") and chat_id == ADMIN_CHAT_ID:
+                            idx = int(data.split("_")[1])
+                            with data_lock:
+                                if 0 <= idx < len(mother_accounts):
+                                    deleted = mother_accounts.pop(idx)
+                                    save_all()
+                                    show_free_mother_list_refresh(chat_id, cb["message"]["message_id"])
+                                    send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট {deleted['username']} মুছে ফেলা হয়েছে।", ADMIN_CHAT_ID)
+                                else:
+                                    send_telegram_message("❌ আইটেম পাওয়া যায়নি।", ADMIN_CHAT_ID)
+                        elif data.startswith("motherstock_page_") and chat_id == ADMIN_CHAT_ID:
+                            page = int(data.split("_")[2])
+                            message_id = cb["message"]["message_id"]
+                            show_mother_stock_detail(chat_id, page=page, message_id=message_id)
+                        elif data == "close_motherstock" and chat_id == ADMIN_CHAT_ID:
+                            send_telegram_message("📦 মাদার স্টক তালিকা বন্ধ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+                        elif data.startswith("freemother_page_") and chat_id == ADMIN_CHAT_ID:
+                            page = int(data.split("_")[2])
+                            message_id = cb["message"]["message_id"]
+                            show_free_mother_list(chat_id, page=page, message_id=message_id)
+                        elif data == "close_freemotherlist" and chat_id == ADMIN_CHAT_ID:
+                            send_telegram_message("🎁 ফ্রি মাদার তালিকা বন্ধ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+                        elif data.startswith("admin_profile_") and chat_id == ADMIN_CHAT_ID:
+                            target = data[14:]
+                            show_profile(target)
                         continue
 
                     # ========== MESSAGE ==========
@@ -1229,30 +1358,36 @@ def handle_telegram_commands():
                             if "reply_to_message" in msg and msg["reply_to_message"]:
                                 reply = msg["reply_to_message"]
                                 caption = parts[2] if len(parts) > 2 else reply.get("caption", "")
-                                if "photo" in reply:
-                                    file_id = reply["photo"][-1]["file_id"]
-                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                                                  json={"chat_id": target, "photo": file_id, "caption": caption})
-                                elif "document" in reply:
-                                    file_id = reply["document"]["file_id"]
-                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                                                  json={"chat_id": target, "document": file_id, "caption": caption})
-                                elif "voice" in reply:
-                                    file_id = reply["voice"]["file_id"]
-                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
-                                                  json={"chat_id": target, "voice": file_id, "caption": caption})
-                                elif "video" in reply:
-                                    file_id = reply["video"]["file_id"]
-                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
-                                                  json={"chat_id": target, "video": file_id, "caption": caption})
-                                else:
-                                    send_telegram_message("❌ অচেনা মিডিয়া টাইপ।", chat_id)
-                                    continue
-                                send_telegram_message(f"✅ {target} কে মিডিয়া পাঠানো হয়েছে।", chat_id)
+                                try:
+                                    if "photo" in reply:
+                                        file_id = reply["photo"][-1]["file_id"]
+                                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                                                      json={"chat_id": target, "photo": file_id, "caption": caption})
+                                    elif "document" in reply:
+                                        file_id = reply["document"]["file_id"]
+                                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                                      json={"chat_id": target, "document": file_id, "caption": caption})
+                                    elif "voice" in reply:
+                                        file_id = reply["voice"]["file_id"]
+                                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                                                      json={"chat_id": target, "voice": file_id, "caption": caption})
+                                    elif "video" in reply:
+                                        file_id = reply["video"]["file_id"]
+                                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+                                                      json={"chat_id": target, "video": file_id, "caption": caption})
+                                    else:
+                                        send_telegram_message("❌ অচেনা মিডিয়া টাইপ।", chat_id)
+                                        continue
+                                    send_telegram_message(f"✅ {target} কে মিডিয়া পাঠানো হয়েছে।", chat_id)
+                                except Exception as e:
+                                    send_telegram_message(f"⚠️ মিডিয়া পাঠাতে সমস্যা হয়েছে: {e}", chat_id)
                             else:
                                 if len(parts) >= 3:
-                                    send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{parts[2]}", target)
-                                    send_telegram_message(f"✅ {target} কে মেসেজ পাঠানো হয়েছে।", chat_id)
+                                    try:
+                                        send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{parts[2]}", target)
+                                        send_telegram_message(f"✅ {target} কে মেসেজ পাঠানো হয়েছে।", chat_id)
+                                    except Exception as e:
+                                        send_telegram_message(f"⚠️ মেসেজ পাঠাতে ব্যর্থ: {e}", chat_id)
                                 else:
                                     send_telegram_message("/send <user_id> <টেক্সট>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
                             continue
@@ -1311,7 +1446,12 @@ def handle_telegram_commands():
                         elif text == "💰 মাদার মূল্য সেট" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("/setmotherprice <মূল্য>", chat_id)
                         elif text == "📋 ইউজার লিস্ট" and chat_id == ADMIN_CHAT_ID:
-                            send_telegram_message("সাবস্ক্রাইবড ইউজার:\n" + "\n".join(f"{uid} - {user_info.get(uid,'?')}" for uid in subscribed_users), chat_id)
+                            if not subscribed_users:
+                                send_telegram_message("কোনো ইউজার নেই।", chat_id)
+                            else:
+                                for uid in subscribed_users:
+                                    kb = {"inline_keyboard": [[{"text": "👤 প্রোফাইল দেখুন", "callback_data": f"admin_profile_{uid}"}]]}
+                                    send_telegram_message(f"• {user_info.get(uid, '?')} ({uid})", chat_id, reply_markup=kb)
                         elif text == "✉️ ইউজারকে মেসেজ" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("/send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
                         elif text == "📁 ব্যাকআপ" and chat_id == ADMIN_CHAT_ID:
@@ -1375,7 +1515,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 save_all()
             if len(parts) > 1 and parts[1].startswith("ref_"):
                 ref_id = parts[1][4:]
-                if ref_id.isdigit() and ref_id != chat_id and ref_id not in referrals:
+                if ref_id.isdigit() and ref_id != chat_id and chat_id not in referrals:
                     referrals[chat_id] = ref_id
                     save_all()
                     send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
@@ -1425,7 +1565,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message("/setbkash <নম্বর>", chat_id)
 
     elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
-        # একক ফ্রি মাদার যোগ
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
             return
@@ -1444,22 +1583,12 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
     elif cmd == "/addmotherbulk" and chat_id == ADMIN_CHAT_ID:
-        # বহুল ফ্রি মাদার যোগ সেশন শুরু
         start_add_mother_bulk(chat_id)
 
     elif cmd == "/motherlist" and chat_id == ADMIN_CHAT_ID:
-        with data_lock:
-            if not mother_accounts:
-                send_telegram_message("কোনো ফ্রি মাদার একাউন্ট নেই।", chat_id)
-                return
-            msg_lines = ["🎁 ফ্রি মাদার একাউন্ট তালিকা:\n"]
-            for i, acc in enumerate(mother_accounts, 1):
-                assigned = "কেহ না" if not acc.get("assigned_to") else acc["assigned_to"]
-                msg_lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key','')} | বরাদ্দ: {assigned}")
-        send_telegram_message("\n".join(msg_lines), chat_id)
+        show_free_mother_list(chat_id)
 
     elif cmd == "/deletemother" and chat_id == ADMIN_CHAT_ID:
-        # একক ফ্রি মাদার ডিলিট
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemother <ইনডেক্স>\nইনডেক্স জানতে /motherlist দিন।", chat_id)
             return
@@ -1477,7 +1606,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message("❌ ভুল ইনডেক্স। /motherlist দিয়ে সঠিক নম্বর দেখুন।", chat_id)
 
     elif cmd == "/deletemothers" and chat_id == ADMIN_CHAT_ID:
-        # একাধিক ফ্রি মাদার ডিলিট (কমা দিয়ে)
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemothers <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemothers 2,5,7", chat_id)
             return
@@ -1500,7 +1628,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherlist দিয়ে দেখুন।", chat_id)
 
     elif cmd == "/deletemotherstock" and chat_id == ADMIN_CHAT_ID:
-        # একাধিক পেইড মাদার স্টক ডিলিট (কমা দিয়ে)
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemotherstock <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemotherstock 2,5,7", chat_id)
             return
@@ -1521,6 +1648,13 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
         else:
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherstocklist দিয়ে দেখুন।", chat_id)
+
+    elif cmd == "/profile" and chat_id == ADMIN_CHAT_ID:
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_telegram_message("/profile <user_id>", chat_id)
+            return
+        target = parts[1]
+        show_profile(target)
 
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
@@ -1607,14 +1741,16 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
 
 # ================== DAILY TASKS ==================
 def daily_task_loop():
+    global last_morning_sent_date, last_evening_sent_date
     while True:
         now = datetime.datetime.now()
-        if (now.hour == 3 or now.hour == 15) and now.minute == 0:
+        today_str = str(now.date())
+
+        if now.hour == 3 and now.minute == 0 and last_morning_sent_date != today_str:
+            last_morning_sent_date = today_str
             for uid in list(subscribed_users):
                 progress = get_target_progress(uid)
-                if not progress:
-                    continue
-                if now.hour == 3:
+                if progress:
                     msg = (
                         f"🌅 সুপ্রভাত!\n"
                         f"আপনার মাসিক টার্গেট: {progress['target']} টাকা\n"
@@ -1625,21 +1761,26 @@ def daily_task_loop():
                         f"   ↳ কুকিজ দিয়ে: {progress['daily_cookies_needed']:.1f} টি ({progress['price_cookies']} টাকা)\n"
                         f"আজকে সফল হোন!"
                     )
-                else:
-                    if progress['remaining'] > 0:
-                        msg = (
-                            f"⏰ শুভ সন্ধ্যা!\n"
-                            f"আপনার এখনো {progress['remaining']} টাকা বাকি।\n"
-                            f"আজকের আয়: {progress['today_income']} টাকা\n"
-                            f"প্রয়োজনীয় একাউন্ট (আনুমানিক):\n"
-                            f"   🔐 2FA: {progress['daily_2fa_needed']:.1f} টি\n"
-                            f"   🍪 কুকিজ: {progress['daily_cookies_needed']:.1f} টি\n"
-                            f"চেষ্টা চালিয়ে যান!"
-                        )
-                    else:
-                        continue
-                send_telegram_message(msg, uid)
-                time.sleep(0.1)
+                    send_telegram_message(msg, uid)
+                    time.sleep(0.1)
+
+        if now.hour == 15 and now.minute == 0 and last_evening_sent_date != today_str:
+            last_evening_sent_date = today_str
+            for uid in list(subscribed_users):
+                progress = get_target_progress(uid)
+                if progress and progress['remaining'] > 0:
+                    msg = (
+                        f"⏰ শুভ সন্ধ্যা!\n"
+                        f"আপনার এখনো {progress['remaining']} টাকা বাকি।\n"
+                        f"আজকের আয়: {progress['today_income']} টাকা\n"
+                        f"প্রয়োজনীয় একাউন্ট (আনুমানিক):\n"
+                        f"   🔐 2FA: {progress['daily_2fa_needed']:.1f} টি\n"
+                        f"   🍪 কুকিজ: {progress['daily_cookies_needed']:.1f} টি\n"
+                        f"চেষ্টা চালিয়ে যান!"
+                    )
+                    send_telegram_message(msg, uid)
+                    time.sleep(0.1)
+
         time.sleep(60)
 
 # ================== FLASK ==================

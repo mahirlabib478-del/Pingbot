@@ -1293,8 +1293,7 @@ def handle_commands(chat_id, text, chat_type="private"):
         send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
     else:
         send_telegram_message("/setbkash <নম্বর>", chat_id)
-
-elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
+    elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
     # ফরম্যাট: /addmother username password [2fa_key]
     if len(parts) < 3:
         send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
@@ -1312,6 +1311,8 @@ elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
         })
         save_all()
     send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
+
+
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
             try:

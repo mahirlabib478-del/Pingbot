@@ -44,31 +44,31 @@ app = Flask(__name__)
 # ================== GLOBALS ==================
 last_update_id = None
 subscribed_users = set()
-user_info = {}
-mother_accounts = []
-user_last_request = {}
+user_info = {}                    # chat_id -> username/firstname
+mother_accounts = []              # free mother accounts (old)
+user_last_request = {}            # cooldowns for free mother account
 maintenance_mode = False
 
-user_balances = {}
-submissions = []
-mother_stock = []
+user_balances = {}                # chat_id -> balance (float)
+submissions = []                  # list of submission dicts
+mother_stock = []                 # buyable mother accounts
 config = {
     "price_cookies": 3.5,
     "price_2fa": 3.0,
     "mother_price": 5.0,
     "referral_level1": 5.0,
     "referral_level2": 1.0,
-    "monthly_target": 5000.0,
-    "target_bonus": 2.0,
+    "monthly_target": 5000.0,    # default target (not used directly)
+    "target_bonus": 2.0,         # bonus percentage
     "lock_2fa": False,
     "lock_cookies": False,
     "bkash_number": "01XXXXXXXXX",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False
 }
-referrals = {}
-referral_bonuses = {}
-leaderboard = {}
+referrals = {}                    # invitee -> referrer
+referral_bonuses = {}             # referrer -> total bonus earned
+leaderboard = {}                  # user_id -> { ... }
 withdraw_requests = []
 deposit_requests = []
 
@@ -84,6 +84,10 @@ broadcast_sessions = {}
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 last_backup_message_id = None
+
+# Daily/monthly tracking
+last_daily_check_date = None
+last_monthly_check_month = None
 
 # ================== FILE I/O ==================
 def load_json(filename, default):
@@ -375,6 +379,106 @@ def generate_mother_purchase_excel(accounts):
     output.seek(0)
     return output.read()
 
+# ================== UTILS: ENHANCED TRACKING ==================
+def init_leaderboard_entry(user_id):
+    if user_id not in leaderboard:
+        leaderboard[user_id] = {
+            "total_submitted_2fa":0, "total_submitted_cookies":0,
+            "total_ok_2fa":0, "total_ok_cookies":0,
+            "total_income":0.0,
+            "current_month_income":0.0,
+            "last_month_income":0.0,
+            "today_ok_2fa":0, "today_ok_cookies":0,
+            "today_date": str(datetime.date.today()),
+            "monthly_bonus_paid": False,
+            "monthly_target": None
+        }
+
+def reset_daily_if_needed(user_id):
+    now = datetime.datetime.now()
+    today_str = str(now.date())
+    with data_lock:
+        entry = leaderboard.get(user_id)
+        if not entry:
+            init_leaderboard_entry(user_id)
+            entry = leaderboard[user_id]
+        if entry.get("today_date") != today_str:
+            # Reset daily counters
+            entry["today_ok_2fa"] = 0
+            entry["today_ok_cookies"] = 0
+            entry["today_date"] = today_str
+
+def add_ok(user_id, acc_type, count, amount):
+    with data_lock:
+        init_leaderboard_entry(user_id)
+        reset_daily_if_needed(user_id)
+        entry = leaderboard[user_id]
+        entry[f"total_ok_{acc_type}"] += count
+        entry["total_income"] += amount
+        entry["current_month_income"] += amount
+        entry[f"today_ok_{acc_type}"] += count
+
+def check_monthly_reset():
+    now = datetime.datetime.now()
+    current_month = now.month
+    current_year = now.year
+    with data_lock:
+        for uid, entry in leaderboard.items():
+            # We store a "month_key" like "2026-6" to track when was last reset
+            month_key = entry.get("current_month_key")
+            current_key = f"{current_year}-{current_month}"
+            if month_key != current_key:
+                # Archive last month's income
+                entry["last_month_income"] = entry.get("current_month_income", 0.0)
+                # Check bonus
+                target = entry.get("monthly_target")
+                if target and entry["last_month_income"] >= target and not entry.get("monthly_bonus_paid", False):
+                    bonus = entry["last_month_income"] * config["target_bonus"] / 100.0
+                    user_balances[uid] = user_balances.get(uid, 0) + bonus
+                    entry["total_income"] += bonus
+                    send_telegram_message(f"🎉 গত মাসের টার্গেট পূরণ! বোনাস {bonus} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", uid)
+                    entry["monthly_bonus_paid"] = True
+                # Reset current month
+                entry["current_month_income"] = 0.0
+                entry["monthly_bonus_paid"] = False
+                entry["current_month_key"] = current_key
+        save_all()
+
+def get_target_progress(uid):
+    """Returns a dict with daily target info for the user."""
+    entry = leaderboard.get(uid, {})
+    target = entry.get("monthly_target")
+    if not target:
+        return None
+    now = datetime.datetime.now()
+    days_left = (datetime.date(now.year, now.month, 1) + datetime.timedelta(days=32)).replace(day=1) - now.date()
+    days_left = days_left.days if days_left.days >= 0 else 0
+    today = now.date()
+    # Calculate total OKs needed based on average price? Simpler: show required income per day.
+    current_income = entry.get("current_month_income", 0.0)
+    remaining_income = max(0, target - current_income)
+    if days_left > 0:
+        daily_income = remaining_income / days_left
+    else:
+        daily_income = remaining_income
+    # Break down into account types using current prices
+    price_2fa = config["price_2fa"]
+    price_cookies = config["price_cookies"]
+    # Assume proportional need based on past OKs? Use a fixed suggestion: 50% 2fa, 50% cookies.
+    # Actually, we can suggest user to submit both types to reach target.
+    # We'll calculate number of accounts needed: daily_income / price per account.
+    # But since prices differ, we just show daily required total income.
+    return {
+        "target": target,
+        "current_income": current_income,
+        "remaining": remaining_income,
+        "days_left": days_left,
+        "daily_income_needed": daily_income,
+        "today_ok_2fa": entry.get("today_ok_2fa", 0),
+        "today_ok_cookies": entry.get("today_ok_cookies", 0),
+        "today_income": entry.get("today_ok_2fa",0)*price_2fa + entry.get("today_ok_cookies",0)*price_cookies
+    }
+
 # ================== SUBMISSION SYSTEM ==================
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
@@ -450,12 +554,8 @@ def process_submission_step(chat_id, text, sender_username):
 
 def update_user_submission_stats(user_id, acc_type, count):
     with data_lock:
-        if user_id not in leaderboard:
-            leaderboard[user_id] = {"total_submitted_2fa":0,"total_submitted_cookies":0,"total_ok_2fa":0,"total_ok_cookies":0,"total_income":0}
-        if acc_type == "2fa":
-            leaderboard[user_id]["total_submitted_2fa"] += count
-        else:
-            leaderboard[user_id]["total_submitted_cookies"] += count
+        init_leaderboard_entry(user_id)
+        leaderboard[user_id][f"total_submitted_{acc_type}"] += count
 
 # ================== ADMIN APPROVAL ==================
 def admin_approve_start(sub_id):
@@ -481,7 +581,7 @@ def process_admin_approve_step(chat_id, text):
             if sub["id"] == sub_id and sub["status"] == "pending":
                 user_id = sub["user_id"]
                 acc_type = sub["type"]
-                # ---------- চেক: সাবমিটেড এর বেশি ওকে না ----------
+                # Check not exceeding submitted
                 if user_id in leaderboard:
                     total_sub = leaderboard[user_id].get(f"total_submitted_{acc_type}", 0)
                     already_ok = leaderboard[user_id].get(f"total_ok_{acc_type}", 0)
@@ -491,16 +591,13 @@ def process_admin_approve_step(chat_id, text):
                             f"❌ সর্বোচ্চ {max_possible} টি আইডি ওকে করা যাবে। (সাবমিট: {total_sub}, ইতিমধ্যে ওকে: {already_ok})",
                             ADMIN_CHAT_ID)
                         return True
-                # ------------------------------------------------
                 sub["status"] = "approved"
                 sub["ok_count"] = ok_count
                 price = config["price_2fa"] if acc_type == "2fa" else config["price_cookies"]
                 amount = ok_count * price
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
-                if user_id not in leaderboard:
-                    leaderboard[user_id] = {"total_submitted_2fa":0,"total_submitted_cookies":0,"total_ok_2fa":0,"total_ok_cookies":0,"total_income":0}
-                leaderboard[user_id][f"total_ok_{acc_type}"] += ok_count
-                leaderboard[user_id]["total_income"] += amount
+                # Update leaderboard with daily/monthly tracking
+                add_ok(user_id, acc_type, ok_count, amount)
                 distribute_referral_bonus(user_id, amount)
                 save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
@@ -530,8 +627,7 @@ def distribute_referral_bonus(user_id, amount):
                 update_leaderboard_income(grand_referrer, bonus2)
 
 def update_leaderboard_income(user_id, amount):
-    if user_id not in leaderboard:
-        leaderboard[user_id] = {"total_submitted_2fa":0,"total_submitted_cookies":0,"total_ok_2fa":0,"total_ok_cookies":0,"total_income":0}
+    init_leaderboard_entry(user_id)
     leaderboard[user_id]["total_income"] += amount
 
 # ================== MOTHER ACCOUNT (FREE) ==================
@@ -672,15 +768,32 @@ def process_add_mother_step(chat_id, text):
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
     with data_lock:
+        init_leaderboard_entry(chat_id)
         bal = user_balances.get(chat_id, 0)
-        stats = leaderboard.get(chat_id, {})
-        msg = (f"👤 আপনার প্রোফাইল\n\n💰 মোট ইনকাম: {stats.get('total_income',0)} টাকা\n📊 ব্যালেন্স: {bal} টাকা\n\n"
-               f"📤 সাবমিট:\n  🔐 2FA: {stats.get('total_submitted_2fa',0)} টি (ওকে: {stats.get('total_ok_2fa',0)})\n"
-               f"  🍪 কুকিজ: {stats.get('total_submitted_cookies',0)} টি (ওকে: {stats.get('total_ok_cookies',0)})\n"
-               f"------------------\n")
-        target = stats.get("monthly_target")
-        msg += f"🎯 আপনার মাসিক টার্গেট: {target} টাকা\n" if target else "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
-    send_telegram_message(msg, chat_id, reply_markup={"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]})
+        stats = leaderboard[chat_id]
+        target_progress = get_target_progress(chat_id)
+    msg = (
+        f"👤 আপনার প্রোফাইল\n\n"
+        f"💰 মোট ইনকাম: {stats.get('total_income',0)} টাকা\n"
+        f"📊 ব্যালেন্স: {bal} টাকা\n"
+        f"📅 গত মাসের আয়: {stats.get('last_month_income',0)} টাকা\n\n"
+        f"📤 সাবমিট:\n"
+        f"  🔐 2FA: {stats.get('total_submitted_2fa',0)} টি (ওকে: {stats.get('total_ok_2fa',0)})\n"
+        f"  🍪 কুকিজ: {stats.get('total_submitted_cookies',0)} টি (ওকে: {stats.get('total_ok_cookies',0)})\n"
+    )
+    if target_progress:
+        msg += (
+            f"------------------\n"
+            f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
+            f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
+            f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
+            f"📆 আজকের আয়: {target_progress['today_income']} টাকা\n"
+            f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
+        )
+    else:
+        msg += "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
+    inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
+    send_telegram_message(msg, chat_id, reply_markup=inline_kb)
 
 def show_leaderboard(chat_id):
     with data_lock:
@@ -815,7 +928,6 @@ def forward_support_message(chat_id, msg):
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
                       json={"chat_id": ADMIN_CHAT_ID, "voice": msg["voice"]["file_id"],
                             "caption": f"📩 সাপোর্ট ভয়েস\nইউজার: {sender} ({chat_id})"})
-    # ইউজারকে কনফার্মেশন ও বাতিল বাটন
     cancel_kb = {"inline_keyboard": [[{"text": "❌ সাপোর্ট বন্ধ করুন", "callback_data": "cancel_session"}]]}
     send_telegram_message("✅ আপনার মেসেজ পাঠানো হয়েছে।\nসাপোর্ট থেকে বের হতে নিচের বাটনে চাপুন অথবা /cancel লিখুন।", chat_id, reply_markup=cancel_kb)
 
@@ -900,7 +1012,7 @@ def handle_telegram_commands():
                     if "message" in update:
                         msg = update["message"]
                         chat_id = str(msg["chat"]["id"])
-                        chat_type = msg["chat"]["type"]          # "private", "group", "supergroup"
+                        chat_type = msg["chat"]["type"]
                         text = msg.get("text", "").strip()
                         from_user = msg.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
@@ -942,7 +1054,7 @@ def handle_telegram_commands():
                                 send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
-                        # -------- সাপোর্টের ভিতর /cancel বা /start লিখলে সাপোর্ট বন্ধ হবে --------
+                        # -------- সাপোর্ট ভিতর /cancel --------
                         if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             support_sessions.discard(chat_id)
                             send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
@@ -973,7 +1085,7 @@ def handle_telegram_commands():
                                 except:
                                     send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id); continue
                                 with data_lock:
-                                    if chat_id not in leaderboard: leaderboard[chat_id] = {}
+                                    init_leaderboard_entry(chat_id)
                                     leaderboard[chat_id]["monthly_target"] = target
                                     save_all()
                                 del submission_sessions[chat_id]
@@ -1015,13 +1127,13 @@ def handle_telegram_commands():
                                     del broadcast_sessions[ADMIN_CHAT_ID]
                             continue
 
-                        # ====== বাটন হ্যান্ডলিং (প্রাইভেট ও গ্রুপ) ======
+                        # ====== বাটন হ্যান্ডলিং ======
                         if chat_type != "private" and text in [
                             "💼 একাউন্ট সাবমিট", "👤 প্রোফাইল", "💰 ব্যালেন্স",
                             "💳 ডিপোজিট", "💸 উইথড্র", "🎁 ফ্রি মাদার একাউন্ট",
                             "🛒 মাদার একাউন্ট কিনুন", "📞 সাপোর্ট"
                         ]:
-                            send_telegram_message("❌ এই অপশন শুধুমাত্র প্রাইভেট চ্যাটে কাজ করে। দয়া করে বটকে ডাইরেক্ট মেসেজ দিন।", chat_id)
+                            send_telegram_message("❌ এই অপশন শুধুমাত্র প্রাইভেট চ্যাটে কাজ করে।", chat_id)
                             continue
 
                         if text == "💼 একাউন্ট সাবমিট":
@@ -1109,7 +1221,6 @@ def handle_telegram_commands():
                             handle_commands(chat_id, text, chat_type)
                         elif chat_type == "private" and text:
                             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
-                        # গ্রুপে অপরিচিত মেসেজ ইগনোর
 
         except Exception as e:
             logger.exception("Main loop error:")
@@ -1173,6 +1284,16 @@ def handle_commands(chat_id, text, chat_type="private"):
             save_all()
             send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
         else: send_telegram_message("/setbkash <নম্বর>", chat_id)
+    elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
+        if len(parts) > 1:
+            try:
+                bonus = float(parts[1])
+                config["target_bonus"] = bonus
+                save_all()
+                send_telegram_message(f"✅ টার্গেট বোনাস {bonus}% সেট করা হয়েছে।", chat_id)
+            except:
+                send_telegram_message("/setbonus <শতাংশ>", chat_id)
+        else: send_telegram_message("/setbonus <শতাংশ>", chat_id)
     elif cmd == "/approvedeposit" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2: send_telegram_message("/approvedeposit <id>", chat_id); return
         dep_id = parts[1]
@@ -1251,6 +1372,40 @@ def handle_commands(chat_id, text, chat_type="private"):
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
 
+# ================== DAILY TASKS THREAD ==================
+def daily_task_loop():
+    global last_daily_check_date, last_monthly_check_month
+    # Wait until first full minute
+    time.sleep(60 - datetime.datetime.now().second)
+    while True:
+        now = datetime.datetime.now()
+        # Check monthly reset (first day of month at 00:01 UTC+6 ~ 18:01 previous UTC)
+        # We'll just check if day == 1 and we haven't done this month yet
+        if now.day == 1 and last_monthly_check_month != now.month:
+            check_monthly_reset()
+            last_monthly_check_month = now.month
+
+        # Daily reminders at 9 AM BDT (3 AM UTC) and 9 PM BDT (15 PM UTC)
+        if now.hour == 3 and now.minute == 0:  # Morning
+            for uid in list(subscribed_users):
+                reset_daily_if_needed(uid)
+                progress = get_target_progress(uid)
+                if progress:
+                    msg = (f"🌅 সুপ্রভাত!\nআজকের টার্গেট অর্জনে আপনার প্রয়োজন প্রায় {progress['daily_income_needed']:.1f} টাকা।\n"
+                           f"গতকালের আয়: শীঘ্রই জানা যাবে।\nচলতি মাসের আয়: {progress['current_income']} টাকা")
+                    send_telegram_message(msg, uid)
+                time.sleep(0.1)
+        elif now.hour == 15 and now.minute == 0:  # Evening
+            for uid in list(subscribed_users):
+                progress = get_target_progress(uid)
+                if progress:
+                    remaining = progress['remaining']
+                    if remaining > 0:
+                        send_telegram_message(f"⏰ আজ শেষ হতে আর ৩ ঘণ্টা। আপনার এখনো {remaining} টাকা প্রয়োজন।", uid)
+                time.sleep(0.1)
+
+        time.sleep(60)  # check every minute
+
 # ================== FLASK ==================
 @app.route("/")
 def home():
@@ -1271,6 +1426,7 @@ if __name__ == "__main__":
                 submissions[:] = [s for s in submissions if time.time() - s["timestamp"] < 172800]
                 save_all()
     threading.Thread(target=daily_clean, daemon=True).start()
+    threading.Thread(target=daily_task_loop, daemon=True).start()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

@@ -319,8 +319,8 @@ def admin_panel_keyboard():
             ["📦 মাদার স্টক", "💰 মাদার মূল্য সেট"],
             ["📋 ইউজার লিস্ট", "✉️ ইউজারকে মেসেজ"],
             ["📁 ব্যাকআপ", "📥 রিস্টোর"],
-            ["📥 ডিপোজিট রিকোয়েস্ট", "💳 বিকাশ নম্বর সেট"],
-            ["🔙 মূল মেনু"]
+            ["📥 ডিপোজিট রিকোয়েস্ট", "💳 উইথড্র রিকোয়েস্ট"],
+            ["💳 বিকাশ নম্বর সেট", "🔙 মূল মেনু"]
         ],
         "resize_keyboard": True
     }
@@ -442,10 +442,8 @@ def get_target_progress(uid):
         return None
     try:
         now = datetime.datetime.now()
-        # পরের মাসের প্রথম দিন বের করা (নিরাপদ পদ্ধতি)
         next_month = now.replace(day=28) + datetime.timedelta(days=4)
         last_day = next_month - datetime.timedelta(days=next_month.day)
-        # .date() ব্যবহার করে date অবজেক্টে রূপান্তর (TypeError ফিক্স)
         days_left = (last_day.date() - now.date()).days + 1
         if days_left < 1:
             days_left = 1
@@ -656,9 +654,12 @@ def start_buy_mother(chat_id):
     if not available:
         send_telegram_message("❌ মাদার একাউন্ট স্টক খালি।", chat_id)
         return
+    # Show count and price, ask quantity
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
-    send_telegram_message(f"🛒 মাদার একাউন্ট কিনুন\nপ্রতি পিস মূল্য: {config['mother_price']} টাকা\nআপনি কতটি কিনতে চান? (সংখ্যা লিখুন)\nবাতিল করতে /cancel",
-                         chat_id, reply_markup=cancel_kb)
+    send_telegram_message(
+        f"🛒 মাদার একাউন্ট কিনুন\nপ্রতি পিস মূল্য: {config['mother_price']} টাকা\nবর্তমানে উপলব্ধ স্টক: {len(available)} টি\nআপনি কতটি কিনতে চান? (সংখ্যা লিখুন)\nবাতিল করতে /cancel",
+        chat_id, reply_markup=cancel_kb
+    )
     submission_sessions[chat_id] = {"step": "mother_qty", "type": "mother_buy"}
 
 def process_mother_buy_step(chat_id, text):
@@ -762,6 +763,22 @@ def process_add_mother_step(chat_id, text):
         del admin_add_mother_session[chat_id]
         return True
     return False
+
+# ================== MOTHER STOCK DETAIL & DELETE ==================
+def show_mother_stock_detail(chat_id):
+    with data_lock:
+        available = [m for m in mother_stock if not m.get("sold")]
+    if not available:
+        send_telegram_message("📦 মাদার স্টক খালি।", chat_id)
+        return
+    for idx, acc in enumerate(available):
+        # actual index in mother_stock list? We need to find its original index for deletion
+        # better: store original index in dict? We'll add a temporary 'orig_idx' but that's messy.
+        # Instead, we'll find the index by looking up mother_stock list
+        orig_idx = mother_stock.index(acc)  # works because it's a list of dicts
+        msg = f"📦 মাদার স্টক #{orig_idx+1}\n👤 ইউজারনেম: {acc['username']}\n🔑 পাসওয়ার্ড: {acc['password']}\n🔐 2FA: {acc.get('fa_key','')}"
+        kb = {"inline_keyboard": [[{"text": "🗑️ ডিলিট", "callback_data": f"delmotherstock_{orig_idx}"}]]}
+        send_telegram_message(msg, chat_id, reply_markup=kb)
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
@@ -1014,6 +1031,15 @@ def handle_telegram_commands():
                             broadcast_sessions[ADMIN_CHAT_ID] = {"type": data[3:]}
                             prompts = {"text":"টেক্সট লিখুন","photo":"ছবি পাঠান","document":"ফাইল পাঠান","voice":"ভয়েস পাঠান"}
                             send_telegram_message(f"📢 {prompts.get(data[3:], '')} (সবাইকে পাঠানো হবে):", ADMIN_CHAT_ID)
+                        elif data.startswith("delmotherstock_") and chat_id == ADMIN_CHAT_ID:
+                            idx = int(data.split("_")[1])
+                            with data_lock:
+                                if 0 <= idx < len(mother_stock):
+                                    deleted = mother_stock.pop(idx)
+                                    save_all()
+                                    send_telegram_message(f"🗑️ মাদার স্টক থেকে {deleted['username']} মুছে ফেলা হয়েছে।", ADMIN_CHAT_ID)
+                                else:
+                                    send_telegram_message("❌ আইটেম পাওয়া যায়নি।", ADMIN_CHAT_ID)
                         continue
 
                     # ========== MESSAGE ==========
@@ -1135,6 +1161,44 @@ def handle_telegram_commands():
                                     del broadcast_sessions[ADMIN_CHAT_ID]
                             continue
 
+                        # ====== /send কমান্ড (মিডিয়া সহ) ======
+                        if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
+                            parts = text.split(maxsplit=2)
+                            if len(parts) < 2 or not parts[1].isdigit():
+                                send_telegram_message("/send <user_id> <টেক্সট>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
+                                continue
+                            target = parts[1]
+                            if "reply_to_message" in msg and msg["reply_to_message"]:
+                                reply = msg["reply_to_message"]
+                                caption = parts[2] if len(parts) > 2 else reply.get("caption", "")
+                                if "photo" in reply:
+                                    file_id = reply["photo"][-1]["file_id"]
+                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                                                  json={"chat_id": target, "photo": file_id, "caption": caption})
+                                elif "document" in reply:
+                                    file_id = reply["document"]["file_id"]
+                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                                  json={"chat_id": target, "document": file_id, "caption": caption})
+                                elif "voice" in reply:
+                                    file_id = reply["voice"]["file_id"]
+                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                                                  json={"chat_id": target, "voice": file_id, "caption": caption})
+                                elif "video" in reply:
+                                    file_id = reply["video"]["file_id"]
+                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+                                                  json={"chat_id": target, "video": file_id, "caption": caption})
+                                else:
+                                    send_telegram_message("❌ অচেনা মিডিয়া টাইপ।", chat_id)
+                                    continue
+                                send_telegram_message(f"✅ {target} কে মিডিয়া পাঠানো হয়েছে।", chat_id)
+                            else:
+                                if len(parts) >= 3:
+                                    send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{parts[2]}", target)
+                                    send_telegram_message(f"✅ {target} কে মেসেজ পাঠানো হয়েছে।", chat_id)
+                                else:
+                                    send_telegram_message("/send <user_id> <টেক্সট>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
+                            continue
+
                         # ====== বাটন হ্যান্ডলিং ======
                         if chat_type != "private" and text in [
                             "💼 একাউন্ট সাবমিট", "👤 প্রোফাইল", "💰 ব্যালেন্স",
@@ -1185,14 +1249,13 @@ def handle_telegram_commands():
                             ]})
                         elif text == "📢 ব্রডকাস্ট" and chat_id == ADMIN_CHAT_ID: admin_broadcast_prompt(chat_id)
                         elif text == "➕ মাদার একাউন্ট যোগ" and chat_id == ADMIN_CHAT_ID: start_add_mother_stock(chat_id)
-                        elif text == "📦 মাদার স্টক" and chat_id == ADMIN_CHAT_ID:
-                            send_telegram_message(f"📦 মাদার স্টক: {len([m for m in mother_stock if not m.get('sold')])} টি", chat_id)
+                        elif text == "📦 মাদার স্টক" and chat_id == ADMIN_CHAT_ID: show_mother_stock_detail(chat_id)
                         elif text == "💰 মাদার মূল্য সেট" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("/setmotherprice <মূল্য>", chat_id)
                         elif text == "📋 ইউজার লিস্ট" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("সাবস্ক্রাইবড ইউজার:\n" + "\n".join(f"{uid} - {user_info.get(uid,'?')}" for uid in subscribed_users), chat_id)
                         elif text == "✉️ ইউজারকে মেসেজ" and chat_id == ADMIN_CHAT_ID:
-                            send_telegram_message("/send <user_id> <মেসেজ>", chat_id)
+                            send_telegram_message("/send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
                         elif text == "📁 ব্যাকআপ" and chat_id == ADMIN_CHAT_ID:
                             with data_lock:
                                 backup_data = {
@@ -1221,12 +1284,21 @@ def handle_telegram_commands():
                                     send_telegram_message(
                                         f"📥 ডিপোজিট আইডি: {d['id']}\nইউজার: {d['user_id']}\nপরিমাণ: {d['amount']} টাকা\nট্রানজেকশন: {d['trxid']}\n"
                                         f"/approvedeposit {d['id']} বা /rejectdeposit {d['id']}", chat_id)
+                        elif text == "💳 উইথড্র রিকোয়েস্ট" and chat_id == ADMIN_CHAT_ID:
+                            pending = [w for w in withdraw_requests if w["status"] == "pending"]
+                            if not pending:
+                                send_telegram_message("কোনো পেন্ডিং উইথড্র রিকোয়েস্ট নেই।", chat_id)
+                            else:
+                                for w in pending:
+                                    send_telegram_message(
+                                        f"💳 উইথড্র আইডি: {w['id']}\nইউজার: {w['user_id']}\nপরিমাণ: {w['amount']} টাকা\nবিকাশ: {w['bkash']}\n"
+                                        f"/approvewithdraw {w['id']} বা /rejectwithdraw {w['id']}", chat_id)
                         elif text == "💳 বিকাশ নম্বর সেট" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("বিকাশ নম্বর সেট করতে কমান্ড:\n/setbkash <নম্বর>", chat_id)
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                         elif text.startswith("/"):
-                            handle_commands(chat_id, text, chat_type)
+                            handle_commands(chat_id, text, chat_type, msg)
                         elif chat_type == "private" and text:
                             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
 
@@ -1234,7 +1306,7 @@ def handle_telegram_commands():
             logger.exception("Main loop error:")
         time.sleep(1)
 
-def handle_commands(chat_id, text, chat_type="private"):
+def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode
     parts = text.split()
     cmd = parts[0].lower()
@@ -1287,20 +1359,22 @@ def handle_commands(chat_id, text, chat_type="private"):
         except: send_telegram_message("/setreferral level1/level2 <শতাংশ>", chat_id)
     elif cmd == "/setbkash" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
-           number = parts[1]
-           config["bkash_number"] = number
-           save_all()
-           send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
+            number = parts[1]
+            config["bkash_number"] = number
+            save_all()
+            send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
         else:
-           send_telegram_message("/setbkash <নম্বর>", chat_id)
+            send_telegram_message("/setbkash <নম্বর>", chat_id)
+
     elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
-    # ফরম্যাট: /addmother username password [2fa_key]
+        # ফরম্যাট: /addmother username password [2fa_key]  (2FA key স্পেস সহ পুরোটা নেওয়া হবে)
         if len(parts) < 3:
-           send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
-           return
+            send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
+            return
         username = parts[1]
         password = parts[2]
-        fa_key = parts[3] if len(parts) > 3 else ""
+        # বাকি সব অংশ 2FA key
+        fa_key = " ".join(parts[3:]) if len(parts) > 3 else ""
         with data_lock:
             mother_accounts.append({
                 "username": username,
@@ -1312,6 +1386,16 @@ def handle_commands(chat_id, text, chat_type="private"):
             save_all()
         send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
+    elif cmd == "/motherlist" and chat_id == ADMIN_CHAT_ID:
+        with data_lock:
+            if not mother_accounts:
+                send_telegram_message("কোনো ফ্রি মাদার একাউন্ট নেই।", chat_id)
+                return
+            msg_lines = ["🎁 ফ্রি মাদার একাউন্ট তালিকা:\n"]
+            for i, acc in enumerate(mother_accounts, 1):
+                assigned = "কেহ না" if not acc.get("assigned_to") else acc["assigned_to"]
+                msg_lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key','')} | বরাদ্দ: {assigned}")
+        send_telegram_message("\n".join(msg_lines), chat_id)
 
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
@@ -1374,11 +1458,6 @@ def handle_commands(chat_id, text, chat_type="private"):
                     send_telegram_message(f"❌ আপনার {w['amount']} টাকা উইথড্র বাতিল হয়েছে।", w["user_id"])
                     break
             else: send_telegram_message("❌ পাওয়া যায়নি।", ADMIN_CHAT_ID)
-    elif cmd == "/send" and chat_id == ADMIN_CHAT_ID:
-        if len(parts) >= 3 and parts[1].isdigit():
-            send_telegram_message(f"📩 অ্যাডমিন থেকে:\n\n{' '.join(parts[2:])}", parts[1])
-            send_telegram_message(f"✅ {parts[1]} কে মেসেজ পাঠানো হয়েছে।", chat_id)
-        else: send_telegram_message("/send <user_id> <মেসেজ>", chat_id)
     elif cmd == "/backup" and chat_id == ADMIN_CHAT_ID:
         with data_lock:
             backup_data = {
@@ -1401,11 +1480,10 @@ def handle_commands(chat_id, text, chat_type="private"):
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
 
-# ================== DAILY TASKS (Improved) ==================
+# ================== DAILY TASKS ==================
 def daily_task_loop():
     while True:
         now = datetime.datetime.now()
-        # Run at 3:00 AM UTC (9:00 AM Bangladesh) and 3:00 PM UTC (9:00 PM Bangladesh)
         if (now.hour == 3 or now.hour == 15) and now.minute == 0:
             for uid in list(subscribed_users):
                 progress = get_target_progress(uid)

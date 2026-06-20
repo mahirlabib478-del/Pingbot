@@ -477,6 +477,42 @@ def get_target_progress(uid):
         logger.error(f"get_target_progress error for {uid}: {e}")
         return None
 
+# ================== PROFILE HELPERS ==================
+def get_profile_text(uid):
+    """Returns the profile message string for a given user ID."""
+    with data_lock:
+        init_leaderboard_entry(uid)
+        bal = user_balances.get(uid, 0)
+        stats = leaderboard.get(uid, {})
+        target_progress = get_target_progress(uid)
+
+    msg = (
+        f"👤 {user_info.get(uid, uid)}-এর প্রোফাইল\n\n"
+        f"💰 মোট ইনকাম: {stats.get('total_income', 0)} টাকা\n"
+        f"📊 ব্যালেন্স: {bal} টাকা\n"
+        f"📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
+        f"📤 সাবমিট:\n"
+        f"  🔐 2FA: {stats.get('total_submitted_2fa', 0)} টি (ওকে: {stats.get('total_ok_2fa', 0)})\n"
+        f"  🍪 কুকিজ: {stats.get('total_submitted_cookies', 0)} টি (ওকে: {stats.get('total_ok_cookies', 0)})\n"
+    )
+
+    if target_progress:
+        msg += (
+            f"------------------\n"
+            f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
+            f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
+            f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
+            f"📆 আজকের আয়: {target_progress['today_income']} টাকা "
+            f"(2FA: {target_progress['today_ok_2fa']} টি, কুকিজ: {target_progress['today_ok_cookies']} টি)\n"
+            f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
+            f"   ↳ 2FA দিয়ে: {target_progress['daily_2fa_needed']:.1f} টি ({target_progress['price_2fa']} টাকা)\n"
+            f"   ↳ কুকিজ দিয়ে: {target_progress['daily_cookies_needed']:.1f} টি ({target_progress['price_cookies']} টাকা)\n"
+        )
+    else:
+        msg += "🎯 এখনো মাসিক টার্গেট সেট করেননি।\n"
+
+    return msg
+
 # ================== SUBMISSION SYSTEM ==================
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
@@ -900,7 +936,6 @@ def show_free_mother_list(chat_id, page=0, message_id=None):
         for idx, acc in page_items:
             assigned = "কেহ না" if not acc.get("assigned_to") else acc["assigned_to"]
             lines.append(f"{idx}. 👤 {acc['username']} | 🔑 {acc['password']} | 🔐 {acc.get('fa_key','')} | বরাদ্দ: {assigned}")
-            # inline delete button (index-1 to match array)
             keyboard_rows.append([{"text": f"🗑️ #{idx}", "callback_data": f"delfreemother_{idx-1}"}])
 
         nav_buttons = []
@@ -939,38 +974,9 @@ def show_free_mother_list_refresh(chat_id, message_id, page=None):
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
+    """Shows profile to the user himself (used by profile button)."""
     try:
-        with data_lock:
-            init_leaderboard_entry(chat_id)
-            bal = user_balances.get(chat_id, 0)
-            stats = leaderboard.get(chat_id, {})
-            target_progress = get_target_progress(chat_id)
-
-        msg = (
-            f"👤 আপনার প্রোফাইল\n\n"
-            f"💰 মোট ইনকাম: {stats.get('total_income', 0)} টাকা\n"
-            f"📊 ব্যালেন্স: {bal} টাকা\n"
-            f"📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
-            f"📤 সাবমিট:\n"
-            f"  🔐 2FA: {stats.get('total_submitted_2fa', 0)} টি (ওকে: {stats.get('total_ok_2fa', 0)})\n"
-            f"  🍪 কুকিজ: {stats.get('total_submitted_cookies', 0)} টি (ওকে: {stats.get('total_ok_cookies', 0)})\n"
-        )
-
-        if target_progress:
-            msg += (
-                f"------------------\n"
-                f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
-                f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
-                f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
-                f"📆 আজকের আয়: {target_progress['today_income']} টাকা "
-                f"(2FA: {target_progress['today_ok_2fa']} টি, কুকিজ: {target_progress['today_ok_cookies']} টি)\n"
-                f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
-                f"   ↳ 2FA দিয়ে: {target_progress['daily_2fa_needed']:.1f} টি ({target_progress['price_2fa']} টাকা)\n"
-                f"   ↳ কুকিজ দিয়ে: {target_progress['daily_cookies_needed']:.1f} টি ({target_progress['price_cookies']} টাকা)\n"
-            )
-        else:
-            msg += "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
-
+        msg = get_profile_text(chat_id)
         inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
         send_telegram_message(msg, chat_id, reply_markup=inline_kb)
     except Exception as e:
@@ -1220,9 +1226,11 @@ def handle_telegram_commands():
                             show_free_mother_list(chat_id, page=page, message_id=message_id)
                         elif data == "close_freemotherlist" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("🎁 ফ্রি মাদার তালিকা বন্ধ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+                        # ---------- FIXED admin profile view ----------
                         elif data.startswith("admin_profile_") and chat_id == ADMIN_CHAT_ID:
                             target = data[14:]
-                            show_profile(target)
+                            msg = get_profile_text(target)
+                            send_telegram_message(msg, chat_id)
                         continue
 
                     # ========== MESSAGE ==========
@@ -1649,12 +1657,14 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         else:
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherstocklist দিয়ে দেখুন।", chat_id)
 
+    # ---------- FIXED /profile command ----------
     elif cmd == "/profile" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2 or not parts[1].isdigit():
             send_telegram_message("/profile <user_id>", chat_id)
             return
         target = parts[1]
-        show_profile(target)
+        msg_text = get_profile_text(target)
+        send_telegram_message(msg_text, chat_id)
 
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:

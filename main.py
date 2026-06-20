@@ -57,12 +57,13 @@ config = {
     "mother_price": 5.0,
     "referral_level1": 5.0,
     "referral_level2": 1.0,
-    "monthly_target": 5000.0,    # still used for display only, not global target
+    "monthly_target": 5000.0,    # still used for display, not global target
     "target_bonus": 2.0,
     "lock_2fa": False,
     "lock_cookies": False,
     "bkash_number": "",
-    "channel_id": str(CHANNEL_ID) if CHANNEL_ID else ""
+    "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
+    "maintenance_mode": False
 }
 referrals = {}                    # invitee -> referrer
 referral_bonuses = {}             # referrer -> total bonus earned
@@ -124,7 +125,8 @@ def load_all():
         "lock_2fa": False,
         "lock_cookies": False,
         "bkash_number": "",
-        "channel_id": str(CHANNEL_ID) if CHANNEL_ID else ""
+        "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
+        "maintenance_mode": False
     }
     loaded_config = load_json(CONFIG_FILE, default_config)
     for k in default_config:
@@ -148,6 +150,7 @@ def save_all():
     save_json(LEADERBOARD_FILE, leaderboard)
     save_json("withdraw_requests.json", withdraw_requests)
     save_json(CONFIG_FILE, config)
+    # Also save channel backup
     save_data_to_channel()
 
 # ================== TELEGRAM HELPERS ==================
@@ -340,6 +343,7 @@ def admin_panel_keyboard():
             ["📢 ব্রডকাস্ট", "➕ মাদার একাউন্ট যোগ"],
             ["📦 মাদার স্টক", "💰 মাদার মূল্য সেট"],
             ["📋 ইউজার লিস্ট", "✉️ ইউজারকে মেসেজ"],
+            ["📁 ব্যাকআপ", "📥 রিস্টোর"],
             ["🔙 মূল মেনু"]
         ],
         "resize_keyboard": True
@@ -498,7 +502,8 @@ def update_user_submission_stats(user_id, acc_type, count):
 # ================== ADMIN APPROVAL ==================
 def admin_approve_start(sub_id):
     admin_approve_sessions[ADMIN_CHAT_ID] = {"sub_id": sub_id, "step": "ok_count"}
-    send_telegram_message("✅ কতটি আইডি ওকে হয়েছে? সংখ্যা লিখুন:", ADMIN_CHAT_ID, reply_markup={"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]})
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    send_telegram_message("✅ কতটি আইডি ওকে হয়েছে? সংখ্যা লিখুন:", ADMIN_CHAT_ID, reply_markup=cancel_kb)
 
 def process_admin_approve_step(chat_id, text):
     if chat_id != ADMIN_CHAT_ID or ADMIN_CHAT_ID not in admin_approve_sessions:
@@ -968,6 +973,49 @@ def handle_telegram_commands():
                             send_telegram_message("🔧 বট রক্ষণাবেক্ষণ মোডে আছে। কিছুক্ষণ পর চেষ্টা করুন।", chat_id)
                             continue
 
+                        # ---- RESTORE HANDLING (admin reply to document with /restore) ----
+                        if "reply_to_message" in msg and "document" in msg["reply_to_message"] and text.strip().lower() == "/restore" and str(chat_id) == ADMIN_CHAT_ID:
+                            doc = msg["reply_to_message"]["document"]
+                            file_id = doc["file_id"]
+                            file_name = doc.get("file_name", "")
+                            if not file_name.endswith(".json.gz"):
+                                send_telegram_message("❌ শুধুমাত্র .json.gz ব্যাকআপ ফাইল সমর্থিত।", ADMIN_CHAT_ID)
+                                continue
+                            try:
+                                file_info = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
+                                if not file_info.get("ok"):
+                                    send_telegram_message("❌ ফাইল ডাউনলোড করা যায়নি।", ADMIN_CHAT_ID)
+                                    continue
+                                file_path = file_info["result"]["file_path"]
+                                content = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
+                                decompressed = gzip.decompress(content)
+                                data = json.loads(decompressed.decode('utf-8'))
+                                with data_lock:
+                                    global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
+                                    global config, referrals, referral_bonuses, leaderboard, withdraw_requests, user_last_request, maintenance_mode
+                                    subscribed_users = set(data.get("subscribed_users", []))
+                                    user_info = data.get("user_info", {})
+                                    user_balances = data.get("user_balances", {})
+                                    submissions = data.get("submissions", [])
+                                    mother_stock = data.get("mother_stock", [])
+                                    mother_accounts = data.get("mother_accounts", [])
+                                    config = data.get("config", config)
+                                    referrals = data.get("referrals", {})
+                                    referral_bonuses = data.get("referral_bonuses", {})
+                                    leaderboard = data.get("leaderboard", {})
+                                    withdraw_requests = data.get("withdraw_requests", [])
+                                    user_last_request = data.get("user_last_request", {})
+                                    if "maintenance_mode" in config:
+                                        maintenance_mode = config["maintenance_mode"]
+                                    else:
+                                        maintenance_mode = data.get("maintenance_mode", False)
+                                save_all()
+                                send_telegram_message("✅ ব্যাকআপ থেকে রিস্টোর সম্পন্ন হয়েছে।", ADMIN_CHAT_ID)
+                            except Exception as e:
+                                logger.error(f"Restore error: {e}")
+                                send_telegram_message("❌ রিস্টোর ফেইল: " + str(e), ADMIN_CHAT_ID)
+                            continue
+
                         # Support session: forward any message to admin
                         if chat_id in support_sessions:
                             forward_support_message(chat_id, msg)
@@ -1153,6 +1201,37 @@ def handle_telegram_commands():
                         elif text == "✉️ ইউজারকে মেসেজ" and str(chat_id) == ADMIN_CHAT_ID:
                             send_telegram_message("/send <user_id> <মেসেজ>", chat_id)
                             continue
+                        elif text == "📁 ব্যাকআপ" and str(chat_id) == ADMIN_CHAT_ID:
+                            with data_lock:
+                                backup_data = {
+                                    "subscribed_users": list(subscribed_users),
+                                    "user_info": user_info,
+                                    "user_balances": user_balances,
+                                    "submissions": submissions,
+                                    "mother_stock": mother_stock,
+                                    "mother_accounts": mother_accounts,
+                                    "config": config,
+                                    "referrals": referrals,
+                                    "referral_bonuses": referral_bonuses,
+                                    "leaderboard": leaderboard,
+                                    "withdraw_requests": withdraw_requests,
+                                    "user_last_request": user_last_request,
+                                    "timestamp": datetime.datetime.now().isoformat()
+                                }
+                            json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
+                            compressed = gzip.compress(json_bytes, compresslevel=6)
+                            filename = f"manual_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
+                            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                            files = {'document': (filename, compressed, 'application/gzip')}
+                            resp = requests.post(url, data={"chat_id": ADMIN_CHAT_ID}, files=files, timeout=60)
+                            if resp.status_code == 200 and resp.json().get("ok"):
+                                send_telegram_message("✅ ম্যানুয়াল ব্যাকআপ তৈরি হয়েছে। ফাইলটি সংরক্ষণ করুন।", ADMIN_CHAT_ID)
+                            else:
+                                send_telegram_message("⚠️ ব্যাকআপ ফাইল পাঠানো যায়নি।", ADMIN_CHAT_ID)
+                            continue
+                        elif text == "📥 রিস্টোর" and str(chat_id) == ADMIN_CHAT_ID:
+                            send_telegram_message("📥 একটি .json.gz ব্যাকআপ ফাইলে রিপ্লাই দিয়ে /restore লিখুন।", ADMIN_CHAT_ID)
+                            continue
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id))
                             continue
@@ -1280,6 +1359,33 @@ def handle_commands(chat_id, text, sender_username):
             send_telegram_message(f"✅ {target} কে মেসেজ পাঠানো হয়েছে।", chat_id)
         else:
             send_telegram_message("❌ মেসেজ পাঠানো যায়নি।", chat_id)
+    elif cmd == "/backup" and str(chat_id) == ADMIN_CHAT_ID:
+        with data_lock:
+            backup_data = {
+                "subscribed_users": list(subscribed_users),
+                "user_info": user_info,
+                "user_balances": user_balances,
+                "submissions": submissions,
+                "mother_stock": mother_stock,
+                "mother_accounts": mother_accounts,
+                "config": config,
+                "referrals": referrals,
+                "referral_bonuses": referral_bonuses,
+                "leaderboard": leaderboard,
+                "withdraw_requests": withdraw_requests,
+                "user_last_request": user_last_request,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+        json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
+        compressed = gzip.compress(json_bytes, compresslevel=6)
+        filename = f"manual_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+        files = {'document': (filename, compressed, 'application/gzip')}
+        resp = requests.post(url, data={"chat_id": ADMIN_CHAT_ID}, files=files, timeout=60)
+        if resp.status_code == 200 and resp.json().get("ok"):
+            send_telegram_message("✅ ম্যানুয়াল ব্যাকআপ তৈরি হয়েছে। ফাইলটি সংরক্ষণ করুন।", ADMIN_CHAT_ID)
+        else:
+            send_telegram_message("⚠️ ব্যাকআপ ফাইল পাঠানো যায়নি।", ADMIN_CHAT_ID)
     else:
         send_telegram_message("❌ অজানা কমান্ড।", chat_id)
 

@@ -1133,7 +1133,8 @@ def handle_telegram_commands():
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id))
                         elif text.startswith("/"):
                             handle_commands(chat_id, text)
-                        else:
+# শুধু প্রাইভেট চ্যাটে অচেনা মেসেজে সতর্ক করবে, গ্রুপে কিছুই করবে না
+                        elif chat_type == "private" and text:
                             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
         except Exception as e:
             logger.exception("Main loop error:")

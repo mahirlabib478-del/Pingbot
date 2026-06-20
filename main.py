@@ -58,8 +58,8 @@ config = {
     "mother_price": 5.0,
     "referral_level1": 5.0,
     "referral_level2": 1.0,
-    "monthly_target": 5000.0,    # default (not used directly)
-    "target_bonus": 2.0,         # bonus percentage
+    "monthly_target": 5000.0,
+    "target_bonus": 2.0,
     "lock_2fa": False,
     "lock_cookies": False,
     "bkash_number": "01XXXXXXXXX",
@@ -68,7 +68,7 @@ config = {
 }
 referrals = {}                    # invitee -> referrer
 referral_bonuses = {}             # referrer -> total bonus earned
-leaderboard = {}                  # user_id -> enhanced profile data
+leaderboard = {}
 withdraw_requests = []
 deposit_requests = []
 
@@ -76,6 +76,7 @@ deposit_requests = []
 submission_sessions = {}
 admin_approve_sessions = {}
 admin_add_mother_session = {}
+admin_add_mother_bulk_session = {}  # new: bulk free mother add
 withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
@@ -404,14 +405,12 @@ def reset_daily_if_needed(user_id):
         entry["today_date"] = today_str
 
 def add_ok(user_id, acc_type, count, amount):
-    """Adds OK count and handles monthly reset automatically."""
     with data_lock:
         init_leaderboard_entry(user_id)
         entry = leaderboard[user_id]
         now = datetime.datetime.now()
         current_key = f"{now.year}-{now.month}"
 
-        # Monthly reset on first OK of new month
         if entry.get("current_month_key") != current_key:
             last_income = entry.get("current_month_income", 0.0)
             entry["last_month_income"] = last_income
@@ -425,10 +424,8 @@ def add_ok(user_id, acc_type, count, amount):
             entry["monthly_bonus_paid"] = False
             entry["current_month_key"] = current_key
 
-        # Daily reset
         reset_daily_if_needed(user_id)
 
-        # Update counters
         entry[f"total_ok_{acc_type}"] += count
         entry["total_income"] += amount
         entry["current_month_income"] += amount
@@ -593,7 +590,7 @@ def process_admin_approve_step(chat_id, text):
                 price = config["price_2fa"] if acc_type == "2fa" else config["price_cookies"]
                 amount = ok_count * price
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
-                add_ok(user_id, acc_type, ok_count, amount)  # Enhanced tracking
+                add_ok(user_id, acc_type, ok_count, amount)
                 distribute_referral_bonus(user_id, amount)
                 save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
@@ -654,7 +651,6 @@ def start_buy_mother(chat_id):
     if not available:
         send_telegram_message("❌ মাদার একাউন্ট স্টক খালি।", chat_id)
         return
-    # Show count and price, ask quantity
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     send_telegram_message(
         f"🛒 মাদার একাউন্ট কিনুন\nপ্রতি পিস মূল্য: {config['mother_price']} টাকা\nবর্তমানে উপলব্ধ স্টক: {len(available)} টি\nআপনি কতটি কিনতে চান? (সংখ্যা লিখুন)\nবাতিল করতে /cancel",
@@ -764,21 +760,79 @@ def process_add_mother_step(chat_id, text):
         return True
     return False
 
+# ================== BULK FREE MOTHER ADD ==================
+def start_add_mother_bulk(chat_id):
+    admin_add_mother_bulk_session[chat_id] = {"step": "username"}
+    send_telegram_message("➕ ফ্রি মাদার একাউন্ট বাল্ক যোগ\n\nপ্রথমে **ইউজারনেম** লিস্ট দিন (প্রতি লাইনে একটি):", chat_id,
+                         reply_markup={"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]})
+
+def process_add_mother_bulk_step(chat_id, text):
+    if chat_id not in admin_add_mother_bulk_session: return False
+    if text.strip().lower() == "/cancel":
+        del admin_add_mother_bulk_session[chat_id]
+        send_telegram_message("❌ বাতিল করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+        return True
+    session = admin_add_mother_bulk_session[chat_id]
+    step = session["step"]
+    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+    if step == "username":
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
+            return True
+        session["usernames"] = lines
+        session["step"] = "password"
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন ({len(lines)} টি):", chat_id, reply_markup=cancel_kb)
+        return True
+    elif step == "password":
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if len(lines) != len(session["usernames"]):
+            send_telegram_message("❌ পাসওয়ার্ড সংখ্যা মেলেনি।", chat_id, reply_markup=cancel_kb)
+            return True
+        session["passwords"] = lines
+        session["step"] = "2fa"
+        send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে, ফাঁকা রাখা যাবে):", chat_id, reply_markup=cancel_kb)
+        return True
+    elif step == "2fa":
+        raw_lines = text.splitlines()
+        twofa_list = [l.strip() for l in raw_lines]
+        while len(twofa_list) > len(session["usernames"]) and twofa_list[-1] == '':
+            twofa_list.pop()
+        if len(twofa_list) != len(session["usernames"]):
+            send_telegram_message("❌ 2FA কী সংখ্যা মেলেনি।", chat_id, reply_markup=cancel_kb)
+            return True
+        with data_lock:
+            for i in range(len(session["usernames"])):
+                mother_accounts.append({
+                    "username": session["usernames"][i],
+                    "password": session["passwords"][i],
+                    "fa_key": twofa_list[i],
+                    "assigned_to": None,
+                    "assigned_at": None
+                })
+            save_all()
+        send_telegram_message(f"✅ {len(session['usernames'])} টি ফ্রি মাদার একাউন্ট যোগ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+        del admin_add_mother_bulk_session[chat_id]
+        return True
+    return False
+
 # ================== MOTHER STOCK DETAIL & DELETE ==================
 def show_mother_stock_detail(chat_id):
     with data_lock:
-        available = [m for m in mother_stock if not m.get("sold")]
+        available = [(i, acc) for i, acc in enumerate(mother_stock) if not acc.get("sold")]
     if not available:
         send_telegram_message("📦 মাদার স্টক খালি।", chat_id)
         return
-    for idx, acc in enumerate(available):
-        # actual index in mother_stock list? We need to find its original index for deletion
-        # better: store original index in dict? We'll add a temporary 'orig_idx' but that's messy.
-        # Instead, we'll find the index by looking up mother_stock list
-        orig_idx = mother_stock.index(acc)  # works because it's a list of dicts
-        msg = f"📦 মাদার স্টক #{orig_idx+1}\n👤 ইউজারনেম: {acc['username']}\n🔑 পাসওয়ার্ড: {acc['password']}\n🔐 2FA: {acc.get('fa_key','')}"
-        kb = {"inline_keyboard": [[{"text": "🗑️ ডিলিট", "callback_data": f"delmotherstock_{orig_idx}"}]]}
-        send_telegram_message(msg, chat_id, reply_markup=kb)
+
+    lines = ["📦 **পেইড মাদার স্টক (উপলব্ধ):**\n"]
+    keyboard_rows = []
+    for orig_idx, acc in available:
+        line = f"{orig_idx+1}. 👤 {acc['username']} | 🔑 {acc['password']} | 🔐 {acc.get('fa_key','')}"
+        lines.append(line)
+        keyboard_rows.append([{"text": f"🗑️ #{orig_idx+1}", "callback_data": f"delmotherstock_{orig_idx}"}])
+
+    keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "cancel_session"}])
+    send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": keyboard_rows})
 
 # ================== PROFILE & LEADERBOARD ==================
 def show_profile(chat_id):
@@ -992,7 +1046,7 @@ def handle_telegram_commands():
 
                         if data == "cancel_session":
                             cancelled = False
-                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, admin_add_mother_session, admin_approve_sessions, broadcast_sessions]:
+                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, admin_add_mother_session, admin_add_mother_bulk_session, admin_approve_sessions, broadcast_sessions]:
                                 if chat_id in sess_dict:
                                     del sess_dict[chat_id]
                                     cancelled = True
@@ -1136,6 +1190,10 @@ def handle_telegram_commands():
                             process_add_mother_step(chat_id, text)
                             continue
 
+                        if chat_id in admin_add_mother_bulk_session:
+                            process_add_mother_bulk_step(chat_id, text)
+                            continue
+
                         if chat_id in withdraw_sessions:
                             process_withdraw_step(chat_id, text)
                             continue
@@ -1161,7 +1219,7 @@ def handle_telegram_commands():
                                     del broadcast_sessions[ADMIN_CHAT_ID]
                             continue
 
-                        # ====== /send কমান্ড (মিডিয়া সহ) ======
+                        # ====== /send কমান্ড ======
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
                             parts = text.split(maxsplit=2)
                             if len(parts) < 2 or not parts[1].isdigit():
@@ -1367,13 +1425,12 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message("/setbkash <নম্বর>", chat_id)
 
     elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
-        # ফরম্যাট: /addmother username password [2fa_key]  (2FA key স্পেস সহ পুরোটা নেওয়া হবে)
+        # একক ফ্রি মাদার যোগ
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
             return
         username = parts[1]
         password = parts[2]
-        # বাকি সব অংশ 2FA key
         fa_key = " ".join(parts[3:]) if len(parts) > 3 else ""
         with data_lock:
             mother_accounts.append({
@@ -1386,6 +1443,10 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             save_all()
         send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
 
+    elif cmd == "/addmotherbulk" and chat_id == ADMIN_CHAT_ID:
+        # বহুল ফ্রি মাদার যোগ সেশন শুরু
+        start_add_mother_bulk(chat_id)
+
     elif cmd == "/motherlist" and chat_id == ADMIN_CHAT_ID:
         with data_lock:
             if not mother_accounts:
@@ -1396,6 +1457,70 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 assigned = "কেহ না" if not acc.get("assigned_to") else acc["assigned_to"]
                 msg_lines.append(f"{i}. ইউজার: {acc['username']} | পাস: {acc['password']} | 2FA: {acc.get('fa_key','')} | বরাদ্দ: {assigned}")
         send_telegram_message("\n".join(msg_lines), chat_id)
+
+    elif cmd == "/deletemother" and chat_id == ADMIN_CHAT_ID:
+        # একক ফ্রি মাদার ডিলিট
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /deletemother <ইনডেক্স>\nইনডেক্স জানতে /motherlist দিন।", chat_id)
+            return
+        try:
+            idx = int(parts[1]) - 1
+        except:
+            send_telegram_message("❌ সঠিক ইনডেক্স দিন।", chat_id)
+            return
+        with data_lock:
+            if 0 <= idx < len(mother_accounts):
+                deleted = mother_accounts.pop(idx)
+                save_all()
+                send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
+            else:
+                send_telegram_message("❌ ভুল ইনডেক্স। /motherlist দিয়ে সঠিক নম্বর দেখুন।", chat_id)
+
+    elif cmd == "/deletemothers" and chat_id == ADMIN_CHAT_ID:
+        # একাধিক ফ্রি মাদার ডিলিট (কমা দিয়ে)
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /deletemothers <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemothers 2,5,7", chat_id)
+            return
+        idx_str = parts[1]
+        try:
+            indices = sorted([int(x.strip()) for x in idx_str.split(",")], reverse=True)
+        except:
+            send_telegram_message("❌ সঠিক ইনডেক্স দিন (কমা দিয়ে আলাদা করে সংখ্যা)।", chat_id)
+            return
+        with data_lock:
+            deleted = []
+            for idx in indices:
+                if 0 <= idx-1 < len(mother_accounts):
+                    deleted.append(mother_accounts.pop(idx-1))
+            save_all()
+        if deleted:
+            names = ", ".join([d['username'] for d in deleted])
+            send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
+        else:
+            send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherlist দিয়ে দেখুন।", chat_id)
+
+    elif cmd == "/deletemotherstock" and chat_id == ADMIN_CHAT_ID:
+        # একাধিক পেইড মাদার স্টক ডিলিট (কমা দিয়ে)
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /deletemotherstock <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemotherstock 2,5,7", chat_id)
+            return
+        idx_str = parts[1]
+        try:
+            indices = sorted([int(x.strip()) for x in idx_str.split(",")], reverse=True)
+        except:
+            send_telegram_message("❌ সঠিক ইনডেক্স দিন (কমা দিয়ে আলাদা করে সংখ্যা)।", chat_id)
+            return
+        with data_lock:
+            deleted = []
+            for idx in indices:
+                if 0 <= idx-1 < len(mother_stock):
+                    deleted.append(mother_stock.pop(idx-1))
+            save_all()
+        if deleted:
+            names = ", ".join([d['username'] for d in deleted])
+            send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
+        else:
+            send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherstocklist দিয়ে দেখুন।", chat_id)
 
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
@@ -1489,7 +1614,7 @@ def daily_task_loop():
                 progress = get_target_progress(uid)
                 if not progress:
                     continue
-                if now.hour == 3:  # Morning
+                if now.hour == 3:
                     msg = (
                         f"🌅 সুপ্রভাত!\n"
                         f"আপনার মাসিক টার্গেট: {progress['target']} টাকা\n"
@@ -1500,7 +1625,7 @@ def daily_task_loop():
                         f"   ↳ কুকিজ দিয়ে: {progress['daily_cookies_needed']:.1f} টি ({progress['price_cookies']} টাকা)\n"
                         f"আজকে সফল হোন!"
                     )
-                else:  # Evening
+                else:
                     if progress['remaining'] > 0:
                         msg = (
                             f"⏰ শুভ সন্ধ্যা!\n"

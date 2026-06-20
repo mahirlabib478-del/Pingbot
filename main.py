@@ -526,19 +526,33 @@ def process_admin_approve_step(chat_id, text):
     with data_lock:
         for sub in submissions:
             if sub["id"] == sub_id and sub["status"] == "pending":
+                user_id = sub["user_id"]
+                acc_type = sub["type"]
+
+                # ========== এই নতুন চেকটি এখানে বসান ==========
+                if user_id in leaderboard:
+                    total_submitted = leaderboard[user_id].get(f"total_submitted_{acc_type}", 0)
+                    already_ok = leaderboard[user_id].get(f"total_ok_{acc_type}", 0)
+                    max_possible = total_submitted - already_ok
+                    if ok_count > max_possible:
+                        send_telegram_message(
+                            f"❌ আপনি সর্বোচ্চ {max_possible} টি আইডি ওকে করতে পারবেন।\n"
+                            f"সাবমিট করা হয়েছে: {total_submitted} টি\n"
+                            f"ইতিমধ্যে ওকে: {already_ok} টি",
+                            ADMIN_CHAT_ID
+                        )
+                        return True
+                # ============================================
+
                 sub["status"] = "approved"
                 sub["ok_count"] = ok_count
-                user_id = sub["user_id"]
-                price = config["price_2fa"] if sub["type"] == "2fa" else config["price_cookies"]
+                price = config["price_2fa"] if acc_type == "2fa" else config["price_cookies"]
                 amount = ok_count * price
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
                 if user_id not in leaderboard:
                     leaderboard[user_id] = {"total_submitted_2fa":0,"total_submitted_cookies":0,"total_ok_2fa":0,"total_ok_cookies":0,"total_income":0}
+                leaderboard[user_id][f"total_ok_{acc_type}"] += ok_count
                 leaderboard[user_id]["total_income"] += amount
-                if sub["type"] == "2fa":
-                    leaderboard[user_id]["total_ok_2fa"] += ok_count
-                else:
-                    leaderboard[user_id]["total_ok_cookies"] += ok_count
                 distribute_referral_bonus(user_id, amount)
                 save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)

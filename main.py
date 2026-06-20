@@ -58,7 +58,7 @@ config = {
     "mother_price": 5.0,
     "referral_level1": 5.0,
     "referral_level2": 1.0,
-    "monthly_target": 5000.0,    # default target (not used directly)
+    "monthly_target": 5000.0,    # default (not used directly)
     "target_bonus": 2.0,         # bonus percentage
     "lock_2fa": False,
     "lock_cookies": False,
@@ -68,7 +68,7 @@ config = {
 }
 referrals = {}                    # invitee -> referrer
 referral_bonuses = {}             # referrer -> total bonus earned
-leaderboard = {}                  # user_id -> { ... }
+leaderboard = {}                  # user_id -> enhanced profile data
 withdraw_requests = []
 deposit_requests = []
 
@@ -84,10 +84,6 @@ broadcast_sessions = {}
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 last_backup_message_id = None
-
-# Daily/monthly tracking
-last_daily_check_date = None
-last_monthly_check_month = None
 
 # ================== FILE I/O ==================
 def load_json(filename, default):
@@ -220,6 +216,8 @@ def answer_callback_query(callback_id, text=None):
         logger.error(f"Callback answer error: {e}")
 
 # ================== CHANNEL BACKUP ==================
+# ... (keep existing backup functions) ...
+# (I'll include them here for completeness)
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID: return
@@ -379,7 +377,7 @@ def generate_mother_purchase_excel(accounts):
     output.seek(0)
     return output.read()
 
-# ================== UTILS: ENHANCED TRACKING ==================
+# ================== ENHANCED TRACKING ==================
 def init_leaderboard_entry(user_id):
     if user_id not in leaderboard:
         leaderboard[user_id] = {
@@ -391,95 +389,92 @@ def init_leaderboard_entry(user_id):
             "today_ok_2fa":0, "today_ok_cookies":0,
             "today_date": str(datetime.date.today()),
             "monthly_bonus_paid": False,
-            "monthly_target": None
+            "monthly_target": None,
+            "current_month_key": f"{datetime.datetime.now().year}-{datetime.datetime.now().month}"
         }
 
 def reset_daily_if_needed(user_id):
     now = datetime.datetime.now()
     today_str = str(now.date())
-    with data_lock:
-        entry = leaderboard.get(user_id)
-        if not entry:
-            init_leaderboard_entry(user_id)
-            entry = leaderboard[user_id]
-        if entry.get("today_date") != today_str:
-            # Reset daily counters
-            entry["today_ok_2fa"] = 0
-            entry["today_ok_cookies"] = 0
-            entry["today_date"] = today_str
+    entry = leaderboard.get(user_id)
+    if not entry:
+        init_leaderboard_entry(user_id)
+        entry = leaderboard[user_id]
+    if entry.get("today_date") != today_str:
+        entry["today_ok_2fa"] = 0
+        entry["today_ok_cookies"] = 0
+        entry["today_date"] = today_str
 
 def add_ok(user_id, acc_type, count, amount):
+    """Adds OK count and handles monthly reset automatically."""
     with data_lock:
         init_leaderboard_entry(user_id)
-        reset_daily_if_needed(user_id)
         entry = leaderboard[user_id]
+        now = datetime.datetime.now()
+        current_key = f"{now.year}-{now.month}"
+
+        # Monthly reset on first OK of new month
+        if entry.get("current_month_key") != current_key:
+            last_income = entry.get("current_month_income", 0.0)
+            entry["last_month_income"] = last_income
+            target = entry.get("monthly_target")
+            if target and last_income >= target and not entry.get("monthly_bonus_paid", False):
+                bonus = last_income * config["target_bonus"] / 100.0
+                user_balances[user_id] = user_balances.get(user_id, 0) + bonus
+                entry["total_income"] += bonus
+                send_telegram_message(f"🎉 গত মাসের টার্গেট পূরণ! বোনাস {bonus} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", user_id)
+            entry["current_month_income"] = 0.0
+            entry["monthly_bonus_paid"] = False
+            entry["current_month_key"] = current_key
+
+        # Daily reset
+        reset_daily_if_needed(user_id)
+
+        # Update counters
         entry[f"total_ok_{acc_type}"] += count
         entry["total_income"] += amount
         entry["current_month_income"] += amount
         entry[f"today_ok_{acc_type}"] += count
-
-def check_monthly_reset():
-    now = datetime.datetime.now()
-    current_month = now.month
-    current_year = now.year
-    with data_lock:
-        for uid, entry in leaderboard.items():
-            # We store a "month_key" like "2026-6" to track when was last reset
-            month_key = entry.get("current_month_key")
-            current_key = f"{current_year}-{current_month}"
-            if month_key != current_key:
-                # Archive last month's income
-                entry["last_month_income"] = entry.get("current_month_income", 0.0)
-                # Check bonus
-                target = entry.get("monthly_target")
-                if target and entry["last_month_income"] >= target and not entry.get("monthly_bonus_paid", False):
-                    bonus = entry["last_month_income"] * config["target_bonus"] / 100.0
-                    user_balances[uid] = user_balances.get(uid, 0) + bonus
-                    entry["total_income"] += bonus
-                    send_telegram_message(f"🎉 গত মাসের টার্গেট পূরণ! বোনাস {bonus} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", uid)
-                    entry["monthly_bonus_paid"] = True
-                # Reset current month
-                entry["current_month_income"] = 0.0
-                entry["monthly_bonus_paid"] = False
-                entry["current_month_key"] = current_key
         save_all()
 
 def get_target_progress(uid):
-    """Returns a dict with daily target info for the user."""
+    """Returns detailed target progress or None."""
     entry = leaderboard.get(uid, {})
     target = entry.get("monthly_target")
     if not target:
         return None
     now = datetime.datetime.now()
-    days_left = (datetime.date(now.year, now.month, 1) + datetime.timedelta(days=32)).replace(day=1) - now.date()
-    days_left = days_left.days if days_left.days >= 0 else 0
-    today = now.date()
-    # Calculate total OKs needed based on average price? Simpler: show required income per day.
+    # Calculate remaining days (excluding today)
+    next_month = now.replace(day=28) + datetime.timedelta(days=4)
+    last_day_of_month = next_month - datetime.timedelta(days=next_month.day)
+    days_left = (last_day_of_month - now.date()).days + 1
+    if days_left < 1:
+        days_left = 1
     current_income = entry.get("current_month_income", 0.0)
-    remaining_income = max(0, target - current_income)
-    if days_left > 0:
-        daily_income = remaining_income / days_left
-    else:
-        daily_income = remaining_income
-    # Break down into account types using current prices
+    remaining = max(0, target - current_income)
+    daily_needed = remaining / days_left if days_left > 0 else remaining
+
     price_2fa = config["price_2fa"]
     price_cookies = config["price_cookies"]
-    # Assume proportional need based on past OKs? Use a fixed suggestion: 50% 2fa, 50% cookies.
-    # Actually, we can suggest user to submit both types to reach target.
-    # We'll calculate number of accounts needed: daily_income / price per account.
-    # But since prices differ, we just show daily required total income.
+    today_income = entry.get("today_ok_2fa",0)*price_2fa + entry.get("today_ok_cookies",0)*price_cookies
+
     return {
         "target": target,
         "current_income": current_income,
-        "remaining": remaining_income,
+        "remaining": remaining,
         "days_left": days_left,
-        "daily_income_needed": daily_income,
+        "daily_income_needed": daily_needed,
+        "daily_2fa_needed": daily_needed / price_2fa if price_2fa > 0 else 0,
+        "daily_cookies_needed": daily_needed / price_cookies if price_cookies > 0 else 0,
         "today_ok_2fa": entry.get("today_ok_2fa", 0),
         "today_ok_cookies": entry.get("today_ok_cookies", 0),
-        "today_income": entry.get("today_ok_2fa",0)*price_2fa + entry.get("today_ok_cookies",0)*price_cookies
+        "today_income": today_income,
+        "price_2fa": price_2fa,
+        "price_cookies": price_cookies
     }
 
 # ================== SUBMISSION SYSTEM ==================
+# (keep all submission functions unchanged) ...
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
     type_label = "🍪 কুকিজ একাউন্ট" if acc_type == "cookies" else "🔐 2FA একাউন্ট"
@@ -581,7 +576,6 @@ def process_admin_approve_step(chat_id, text):
             if sub["id"] == sub_id and sub["status"] == "pending":
                 user_id = sub["user_id"]
                 acc_type = sub["type"]
-                # Check not exceeding submitted
                 if user_id in leaderboard:
                     total_sub = leaderboard[user_id].get(f"total_submitted_{acc_type}", 0)
                     already_ok = leaderboard[user_id].get(f"total_ok_{acc_type}", 0)
@@ -596,8 +590,7 @@ def process_admin_approve_step(chat_id, text):
                 price = config["price_2fa"] if acc_type == "2fa" else config["price_cookies"]
                 amount = ok_count * price
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
-                # Update leaderboard with daily/monthly tracking
-                add_ok(user_id, acc_type, ok_count, amount)
+                add_ok(user_id, acc_type, ok_count, amount)  # Enhanced tracking
                 distribute_referral_bonus(user_id, amount)
                 save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
@@ -787,8 +780,11 @@ def show_profile(chat_id):
             f"🎯 মাসিক টার্গেট: {target_progress['target']} টাকা\n"
             f"📈 চলতি মাসের আয়: {target_progress['current_income']} টাকা\n"
             f"⏳ বাকি: {target_progress['remaining']} টাকা ({target_progress['days_left']} দিন)\n"
-            f"📆 আজকের আয়: {target_progress['today_income']} টাকা\n"
+            f"📆 আজকের আয়: {target_progress['today_income']} টাকা "
+            f"(2FA: {target_progress['today_ok_2fa']} টি, কুকিজ: {target_progress['today_ok_cookies']} টি)\n"
             f"📌 আজকের প্রয়োজন: প্রায় {target_progress['daily_income_needed']:.1f} টাকা\n"
+            f"   ↳ 2FA দিয়ে: {target_progress['daily_2fa_needed']:.1f} টি ({target_progress['price_2fa']} টাকা)\n"
+            f"   ↳ কুকিজ দিয়ে: {target_progress['daily_cookies_needed']:.1f} টি ({target_progress['price_cookies']} টাকা)\n"
         )
     else:
         msg += "🎯 আপনি এখনো মাসিক টার্গেট সেট করেননি।\n"
@@ -806,6 +802,7 @@ def show_leaderboard(chat_id):
     send_telegram_message(msg, chat_id)
 
 # ================== WITHDRAW ==================
+# (keep all withdraw functions unchanged) ...
 def start_withdraw(chat_id):
     withdraw_sessions[chat_id] = {"step": "amount"}
     send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id,
@@ -852,6 +849,7 @@ def process_withdraw_step(chat_id, text):
         return True
 
 # ================== DEPOSIT SYSTEM ==================
+# ... (keep deposit functions unchanged) ...
 def start_deposit(chat_id):
     deposit_sessions[chat_id] = {"step": "amount"}
     bkash = config.get("bkash_number", "সেট করা হয়নি")
@@ -907,6 +905,7 @@ def process_deposit_step(chat_id, text):
     return False
 
 # ================== SUPPORT ==================
+# ... (keep support functions unchanged) ...
 def start_support(chat_id):
     support_sessions.add(chat_id)
     send_telegram_message("📞 আপনার মেসেজ, ছবি, ফাইল বা ভয়েস পাঠান। অ্যাডমিন সরাসরি দেখতে পাবেন।\nবাতিল করতে নিচের বাটনে চাপুন।",
@@ -1156,6 +1155,7 @@ def handle_telegram_commands():
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
+                        # ... (rest of admin panel buttons unchanged) ...
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
                             pending = [s for s in submissions if s["status"]=="pending"]
                             if not pending:
@@ -1372,39 +1372,43 @@ def handle_commands(chat_id, text, chat_type="private"):
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
 
-# ================== DAILY TASKS THREAD ==================
+# ================== DAILY TASKS (Improved) ==================
 def daily_task_loop():
-    global last_daily_check_date, last_monthly_check_month
-    # Wait until first full minute
-    time.sleep(60 - datetime.datetime.now().second)
     while True:
         now = datetime.datetime.now()
-        # Check monthly reset (first day of month at 00:01 UTC+6 ~ 18:01 previous UTC)
-        # We'll just check if day == 1 and we haven't done this month yet
-        if now.day == 1 and last_monthly_check_month != now.month:
-            check_monthly_reset()
-            last_monthly_check_month = now.month
-
-        # Daily reminders at 9 AM BDT (3 AM UTC) and 9 PM BDT (15 PM UTC)
-        if now.hour == 3 and now.minute == 0:  # Morning
-            for uid in list(subscribed_users):
-                reset_daily_if_needed(uid)
-                progress = get_target_progress(uid)
-                if progress:
-                    msg = (f"🌅 সুপ্রভাত!\nআজকের টার্গেট অর্জনে আপনার প্রয়োজন প্রায় {progress['daily_income_needed']:.1f} টাকা।\n"
-                           f"গতকালের আয়: শীঘ্রই জানা যাবে।\nচলতি মাসের আয়: {progress['current_income']} টাকা")
-                    send_telegram_message(msg, uid)
-                time.sleep(0.1)
-        elif now.hour == 15 and now.minute == 0:  # Evening
+        # Run at 3:00 AM UTC (9:00 AM Bangladesh) and 3:00 PM UTC (9:00 PM Bangladesh)
+        if (now.hour == 3 or now.hour == 15) and now.minute == 0:
             for uid in list(subscribed_users):
                 progress = get_target_progress(uid)
-                if progress:
-                    remaining = progress['remaining']
-                    if remaining > 0:
-                        send_telegram_message(f"⏰ আজ শেষ হতে আর ৩ ঘণ্টা। আপনার এখনো {remaining} টাকা প্রয়োজন।", uid)
+                if not progress:
+                    continue
+                if now.hour == 3:  # Morning
+                    msg = (
+                        f"🌅 সুপ্রভাত!\n"
+                        f"আপনার মাসিক টার্গেট: {progress['target']} টাকা\n"
+                        f"চলতি মাসের আয়: {progress['current_income']} টাকা\n"
+                        f"⏳ বাকি: {progress['remaining']} টাকা ({progress['days_left']} দিন)\n"
+                        f"📌 আজকের গড় প্রয়োজন: {progress['daily_income_needed']:.1f} টাকা\n"
+                        f"   ↳ 2FA দিয়ে: {progress['daily_2fa_needed']:.1f} টি ({progress['price_2fa']} টাকা)\n"
+                        f"   ↳ কুকিজ দিয়ে: {progress['daily_cookies_needed']:.1f} টি ({progress['price_cookies']} টাকা)\n"
+                        f"আজকে সফল হোন!"
+                    )
+                else:  # Evening
+                    if progress['remaining'] > 0:
+                        msg = (
+                            f"⏰ শুভ সন্ধ্যা!\n"
+                            f"আপনার এখনো {progress['remaining']} টাকা বাকি।\n"
+                            f"আজকের আয়: {progress['today_income']} টাকা\n"
+                            f"প্রয়োজনীয় একাউন্ট (আনুমানিক):\n"
+                            f"   🔐 2FA: {progress['daily_2fa_needed']:.1f} টি\n"
+                            f"   🍪 কুকিজ: {progress['daily_cookies_needed']:.1f} টি\n"
+                            f"চেষ্টা চালিয়ে যান!"
+                        )
+                    else:
+                        continue
+                send_telegram_message(msg, uid)
                 time.sleep(0.1)
-
-        time.sleep(60)  # check every minute
+        time.sleep(60)
 
 # ================== FLASK ==================
 @app.route("/")

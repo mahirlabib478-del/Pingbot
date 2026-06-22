@@ -1129,8 +1129,11 @@ def admin_broadcast_prompt(chat_id):
 
 # ================== MAIN TELEGRAM HANDLER ==================
 def handle_telegram_commands():
+    # ========== ALL GLOBAL DECLARATIONS HERE ==========
     global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
-    global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request, maintenance_mode, last_update_id
+    global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
+    global maintenance_mode, last_update_id
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     while True:
         try:
@@ -1260,8 +1263,7 @@ def handle_telegram_commands():
                                             content = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info['result']['file_path']}", timeout=60).content
                                             data = json.loads(gzip.decompress(content).decode('utf-8'))
                                             with data_lock:
-                                                global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
-                                                global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
+                                                # These globals are already declared; no need to re-declare here
                                                 subscribed_users = set(data.get("subscribed_users", []))
                                                 user_info = data.get("user_info", {})
                                                 user_balances = data.get("user_balances", {})

@@ -857,7 +857,7 @@ def process_add_mother_bulk_step(chat_id, text):
         return True
     return False
 
-# ================== MOTHER STOCK DETAIL & DELETE (PAGINATED + REFRESH) ==================
+# ================== MOTHER STOCK DETAIL & DELETE ==================
 def show_mother_stock_detail(chat_id, page=0, message_id=None):
     with data_lock:
         available = [(i, acc) for i, acc in enumerate(mother_stock) if not acc.get("sold")]
@@ -917,7 +917,7 @@ def show_mother_stock_detail_refresh(chat_id, message_id, page=None):
         page = total_pages - 1
     show_mother_stock_detail(chat_id, page=page, message_id=message_id)
 
-# ================== FREE MOTHER LIST (PAGINATED + INLINE DELETE) ==================
+# ================== FREE MOTHER LIST ==================
 def show_free_mother_list(chat_id, page=0, message_id=None):
     with data_lock:
         if not mother_accounts:
@@ -1243,37 +1243,43 @@ def handle_telegram_commands():
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
                             continue
 
-                        # -------- রিস্টোর --------
-                        if "reply_to_message" in msg and "document" in msg["reply_to_message"] and text.lower() == "/restore" and chat_id == ADMIN_CHAT_ID:
-                            doc = msg["reply_to_message"]["document"]
-                            if not doc.get("file_name","").endswith(".json.gz"):
-                                send_telegram_message("❌ শুধুমাত্র .json.gz ফাইল সমর্থিত।", ADMIN_CHAT_ID)
-                                continue
-                            try:
-                                file_info = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={doc['file_id']}", timeout=20).json()
-                                if not file_info.get("ok"):
-                                    send_telegram_message("❌ ফাইল ডাউনলোড করা যায়নি।", ADMIN_CHAT_ID); continue
-                                content = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info['result']['file_path']}", timeout=60).content
-                                data = json.loads(gzip.decompress(content).decode('utf-8'))
-                                with data_lock:
-                                    subscribed_users = set(data.get("subscribed_users", []))
-                                    user_info = data.get("user_info", {})
-                                    user_balances = data.get("user_balances", {})
-                                    submissions = data.get("submissions", [])
-                                    mother_stock = data.get("mother_stock", [])
-                                    mother_accounts = data.get("mother_accounts", [])
-                                    config = data.get("config", config)
-                                    referrals = data.get("referrals", {})
-                                    referral_bonuses = data.get("referral_bonuses", {})
-                                    leaderboard = data.get("leaderboard", {})
-                                    withdraw_requests = data.get("withdraw_requests", [])
-                                    deposit_requests = data.get("deposit_requests", [])
-                                    user_last_request = data.get("user_last_request", {})
-                                    maintenance_mode = data.get("maintenance_mode", False)
-                                save_all()
-                                send_telegram_message("✅ ব্যাকআপ রিস্টোর সম্পন্ন।", ADMIN_CHAT_ID)
-                            except Exception as e:
-                                send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
+                        # ====== /restore (একদম আগে চেক) ======
+                        if chat_id == ADMIN_CHAT_ID and text.strip().lower() == "/restore":
+                            if "reply_to_message" not in msg or "document" not in msg["reply_to_message"]:
+                                send_telegram_message("📥 দয়া করে ব্যাকআপ .json.gz ফাইলে রিপ্লাই দিয়ে /restore লিখুন।", ADMIN_CHAT_ID)
+                            else:
+                                doc = msg["reply_to_message"]["document"]
+                                if not doc.get("file_name","").endswith(".json.gz"):
+                                    send_telegram_message("❌ শুধুমাত্র .json.gz ফাইল সমর্থিত।", ADMIN_CHAT_ID)
+                                else:
+                                    try:
+                                        file_info = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={doc['file_id']}", timeout=20).json()
+                                        if not file_info.get("ok"):
+                                            send_telegram_message("❌ ফাইল ডাউনলোড করা যায়নি।", ADMIN_CHAT_ID)
+                                        else:
+                                            content = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info['result']['file_path']}", timeout=60).content
+                                            data = json.loads(gzip.decompress(content).decode('utf-8'))
+                                            with data_lock:
+                                                global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
+                                                global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
+                                                subscribed_users = set(data.get("subscribed_users", []))
+                                                user_info = data.get("user_info", {})
+                                                user_balances = data.get("user_balances", {})
+                                                submissions = data.get("submissions", [])
+                                                mother_stock = data.get("mother_stock", [])
+                                                mother_accounts = data.get("mother_accounts", [])
+                                                config = data.get("config", config)
+                                                referrals = data.get("referrals", {})
+                                                referral_bonuses = data.get("referral_bonuses", {})
+                                                leaderboard = data.get("leaderboard", {})
+                                                withdraw_requests = data.get("withdraw_requests", [])
+                                                deposit_requests = data.get("deposit_requests", [])
+                                                user_last_request = data.get("user_last_request", {})
+                                                maintenance_mode = data.get("maintenance_mode", False)
+                                            save_all()
+                                            send_telegram_message("✅ ব্যাকআপ রিস্টোর সম্পন্ন।", ADMIN_CHAT_ID)
+                                    except Exception as e:
+                                        send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
                         # -------- সাপোর্ট ভিতর /cancel --------
@@ -1574,7 +1580,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
         else:
             send_telegram_message("/setbkash <নম্বর>", chat_id)
-
     elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
@@ -1592,13 +1597,10 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             })
             save_all()
         send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
-
     elif cmd == "/addmotherbulk" and chat_id == ADMIN_CHAT_ID:
         start_add_mother_bulk(chat_id)
-
     elif cmd == "/motherlist" and chat_id == ADMIN_CHAT_ID:
         show_free_mother_list(chat_id)
-
     elif cmd == "/deletemother" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemother <ইনডেক্স>\nইনডেক্স জানতে /motherlist দিন।", chat_id)
@@ -1615,7 +1617,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
             else:
                 send_telegram_message("❌ ভুল ইনডেক্স। /motherlist দিয়ে সঠিক নম্বর দেখুন।", chat_id)
-
     elif cmd == "/deletemothers" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemothers <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemothers 2,5,7", chat_id)
@@ -1637,7 +1638,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
         else:
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherlist দিয়ে দেখুন।", chat_id)
-
     elif cmd == "/deletemotherstock" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2:
             send_telegram_message("❌ ফরম্যাট: /deletemotherstock <ইনডেক্স,ইনডেক্স,...>\nযেমন: /deletemotherstock 2,5,7", chat_id)
@@ -1659,7 +1659,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
         else:
             send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি। /motherstocklist দিয়ে দেখুন।", chat_id)
-
     elif cmd == "/profile" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 2 or not parts[1].isdigit():
             send_telegram_message("/profile <user_id>", chat_id)
@@ -1667,7 +1666,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         target = parts[1]
         msg_text = get_profile_text(target)
         send_telegram_message(msg_text, chat_id)
-
     elif cmd == "/setbonus" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
             try:

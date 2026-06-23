@@ -1119,12 +1119,12 @@ def forward_support_message(chat_id, msg):
 
 # ================== ADMIN BROADCAST ==================
 def admin_broadcast_prompt(chat_id):
-    # Added cancel button directly in the prompt
+    # Fixed: "bc_file" -> "bc_document" to match the document type
     kb = {
         "inline_keyboard": [
             [{"text": "📝 টেক্সট", "callback_data": "bc_text"}],
             [{"text": "🖼️ ছবি", "callback_data": "bc_photo"}],
-            [{"text": "📄 ফাইল", "callback_data": "bc_file"}],
+            [{"text": "📄 ফাইল", "callback_data": "bc_document"}],
             [{"text": "🎤 ভয়েস", "callback_data": "bc_voice"}],
             [{"text": "❌ বাতিল", "callback_data": "cancel_broadcast"}]
         ]
@@ -1157,7 +1157,6 @@ def handle_telegram_commands():
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         answer_callback_query(cb["id"])
 
-                        # Handle cancel_broadcast here
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
                             if ADMIN_CHAT_ID in broadcast_sessions:
                                 del broadcast_sessions[ADMIN_CHAT_ID]
@@ -1381,7 +1380,7 @@ def handle_telegram_commands():
                                     del broadcast_sessions[ADMIN_CHAT_ID]
                                 else:
                                     send_telegram_message("⚠️ সঠিক মিডিয়া পাঠান।", ADMIN_CHAT_ID)
-                            continue    # <--- This is critical to avoid falling into unknown command
+                            continue
 
                         # ====== /send কমান্ড ======
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:

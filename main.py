@@ -1119,17 +1119,20 @@ def forward_support_message(chat_id, msg):
 
 # ================== ADMIN BROADCAST ==================
 def admin_broadcast_prompt(chat_id):
-    send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id,
-                         reply_markup={"inline_keyboard": [
-                             [{"text": "📝 টেক্সট", "callback_data": "bc_text"}],
-                             [{"text": "🖼️ ছবি", "callback_data": "bc_photo"}],
-                             [{"text": "📄 ফাইল", "callback_data": "bc_file"}],
-                             [{"text": "🎤 ভয়েস", "callback_data": "bc_voice"}]
-                         ]})
+    # Added cancel button directly in the prompt
+    kb = {
+        "inline_keyboard": [
+            [{"text": "📝 টেক্সট", "callback_data": "bc_text"}],
+            [{"text": "🖼️ ছবি", "callback_data": "bc_photo"}],
+            [{"text": "📄 ফাইল", "callback_data": "bc_file"}],
+            [{"text": "🎤 ভয়েস", "callback_data": "bc_voice"}],
+            [{"text": "❌ বাতিল", "callback_data": "cancel_broadcast"}]
+        ]
+    }
+    send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id, reply_markup=kb)
 
 # ================== MAIN TELEGRAM HANDLER ==================
 def handle_telegram_commands():
-    # ========== ALL GLOBAL DECLARATIONS HERE ==========
     global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
     global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
     global maintenance_mode, last_update_id
@@ -1153,6 +1156,13 @@ def handle_telegram_commands():
                         from_user = cb.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         answer_callback_query(cb["id"])
+
+                        # Handle cancel_broadcast here
+                        if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
+                            if ADMIN_CHAT_ID in broadcast_sessions:
+                                del broadcast_sessions[ADMIN_CHAT_ID]
+                            send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
+                            continue
 
                         if data == "cancel_session":
                             cancelled = False
@@ -1263,7 +1273,6 @@ def handle_telegram_commands():
                                             content = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info['result']['file_path']}", timeout=60).content
                                             data = json.loads(gzip.decompress(content).decode('utf-8'))
                                             with data_lock:
-                                                # These globals are already declared; no need to re-declare here
                                                 subscribed_users = set(data.get("subscribed_users", []))
                                                 user_info = data.get("user_info", {})
                                                 user_balances = data.get("user_balances", {})
@@ -1292,6 +1301,12 @@ def handle_telegram_commands():
 
                         if chat_id in support_sessions:
                             forward_support_message(chat_id, msg)
+                            continue
+
+                        # -------- ব্রডকাস্ট মোডে কমান্ড /cancel --------
+                        if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in broadcast_sessions and text.strip().lower() in ["/cancel", "/start"]:
+                            del broadcast_sessions[ADMIN_CHAT_ID]
+                            send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", ADMIN_CHAT_ID, reply_markup=admin_panel_keyboard())
                             continue
 
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_approve_sessions:
@@ -1340,8 +1355,13 @@ def handle_telegram_commands():
                             process_withdraw_step(chat_id, text)
                             continue
 
+                        # ====== BROADCAST CONTENT ======
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in broadcast_sessions:
                             btype = broadcast_sessions[ADMIN_CHAT_ID]["type"]
+                            if not subscribed_users:
+                                send_telegram_message("⚠️ কোনো সাবস্ক্রাইবার নেই। ব্রডকাস্ট বাতিল।", ADMIN_CHAT_ID)
+                                del broadcast_sessions[ADMIN_CHAT_ID]
+                                continue
                             if btype == "text" and text:
                                 broadcast_message(f"📢 অ্যাডমিন থেকে:\n\n{text}")
                                 send_telegram_message("✅ টেক্সট ব্রডকাস্ট সম্পন্ন।", ADMIN_CHAT_ID)
@@ -1359,7 +1379,9 @@ def handle_telegram_commands():
                                         time.sleep(0.05)
                                     send_telegram_message("✅ ব্রডকাস্ট সম্পন্ন।", ADMIN_CHAT_ID)
                                     del broadcast_sessions[ADMIN_CHAT_ID]
-                            continue
+                                else:
+                                    send_telegram_message("⚠️ সঠিক মিডিয়া পাঠান।", ADMIN_CHAT_ID)
+                            continue    # <--- This is critical to avoid falling into unknown command
 
                         # ====== /send কমান্ড ======
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:

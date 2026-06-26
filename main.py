@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG ==================
-BOT_TOKEN = "8808046131:AAErQgF3q2_k-MbrT8CsiembVkqGj2aLISY"
+BOT_TOKEN = "8808046131:AAG7g0k_hhvQV8cLRmh6ieKeuNBdBphfWkk"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
 BOT_USERNAME = "Ping478bot"

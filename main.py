@@ -42,6 +42,7 @@ DEPOSITS_FILE = "deposits.json"
 TRANSACTIONS_FILE = "transactions.json"
 DUPLICATE_USERNAMES_FILE = "duplicate_usernames.json"
 RPS_WINS_FILE = "rps_daily_wins.json"
+USER_VERSIONS_FILE = "user_versions.json"   # 👈 new file for version tracking
 
 app = Flask(__name__)
 
@@ -70,7 +71,7 @@ config = {
     "nagad_number": "01XXXXXXXXX",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False,
-    "bot_version": "1.0"                # 👈 version for keyboard refresh
+    "bot_version": "1.0"                # 👈 version for auto keyboard refresh
 }
 referrals = {}
 referral_bonuses = {}
@@ -80,6 +81,7 @@ deposit_requests = []
 transactions = []                      # transaction history
 submitted_usernames = set()            # duplicate check
 rps_daily_wins = {}                    # daily RPS reward counter
+user_versions = {}                     # 👈 stores user_id -> "version_string"
 
 # Session trackers
 submission_sessions = {}
@@ -119,7 +121,7 @@ def load_all():
     global mother_accounts, user_last_request, subscribed_users, user_info
     global user_balances, submissions, config, referrals, referral_bonuses, leaderboard
     global mother_stock, withdraw_requests, deposit_requests, maintenance_mode
-    global transactions, submitted_usernames, rps_daily_wins
+    global transactions, submitted_usernames, rps_daily_wins, user_versions
 
     mother_accounts = load_json(MOTHER_FILE, [])
     user_last_request = load_json(COOLDOWN_FILE, {})
@@ -157,6 +159,7 @@ def load_all():
     transactions = load_json(TRANSACTIONS_FILE, [])
     submitted_usernames = set(load_json(DUPLICATE_USERNAMES_FILE, []))
     rps_daily_wins = load_json(RPS_WINS_FILE, {})
+    user_versions = load_json(USER_VERSIONS_FILE, {})
 
 def save_all():
     save_json(MOTHER_FILE, mother_accounts)
@@ -174,6 +177,7 @@ def save_all():
     save_json(TRANSACTIONS_FILE, transactions)
     save_json(DUPLICATE_USERNAMES_FILE, list(submitted_usernames))
     save_json(RPS_WINS_FILE, rps_daily_wins)
+    save_json(USER_VERSIONS_FILE, user_versions)
     save_json(CONFIG_FILE, config)
     save_data_to_channel()
 
@@ -259,6 +263,7 @@ def save_data_to_channel():
                     "transactions": transactions,
                     "submitted_usernames": list(submitted_usernames),
                     "rps_daily_wins": rps_daily_wins,
+                    "user_versions": user_versions,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -305,7 +310,7 @@ def auto_restore_from_channel():
         with data_lock:
             global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
             global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
-            global transactions, submitted_usernames, rps_daily_wins
+            global transactions, submitted_usernames, rps_daily_wins, user_versions
             subscribed_users = set(data.get("subscribed_users", []))
             user_info = data.get("user_info", {})
             user_balances = data.get("user_balances", {})
@@ -322,6 +327,7 @@ def auto_restore_from_channel():
             transactions = data.get("transactions", [])
             submitted_usernames = set(data.get("submitted_usernames", []))
             rps_daily_wins = data.get("rps_daily_wins", {})
+            user_versions = data.get("user_versions", {})
             last_backup_message_id = pinned["message_id"]
         save_all()
     except Exception as e:
@@ -1356,7 +1362,7 @@ def handle_inline_query(inline_query):
 def handle_telegram_commands():
     global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
     global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
-    global maintenance_mode, last_update_id, transactions, submitted_usernames, rps_daily_wins
+    global maintenance_mode, last_update_id, transactions, submitted_usernames, rps_daily_wins, user_versions
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     while True:
@@ -1383,11 +1389,10 @@ def handle_telegram_commands():
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         answer_callback_query(cb["id"])
 
-                        # version refresh (same as message check but for callback)
+                        # version refresh for callback
                         current_version = config.get("bot_version", "1.0")
-                        user_version = user_info.setdefault(chat_id, {}).get("last_version", "0")
+                        user_version = user_versions.get(chat_id, "0")
                         if user_version != current_version:
-                            # clear sessions
                             for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
                                               admin_add_mother_session, admin_add_mother_bulk_session,
                                               admin_approve_sessions, broadcast_sessions, rps_sessions]:
@@ -1395,9 +1400,9 @@ def handle_telegram_commands():
                             support_sessions.discard(chat_id)
                             send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
                                                   chat_id, reply_markup=get_main_keyboard(chat_id))
-                            user_info[chat_id]["last_version"] = current_version
+                            user_versions[chat_id] = current_version
                             save_all()
-                            continue  # ignore the callback after refresh
+                            continue  # ignore callback after refresh
 
                         # existing callback handling
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
@@ -1525,9 +1530,8 @@ def handle_telegram_commands():
 
                         # ---- BOT VERSION CHECK (force refresh) ----
                         current_version = config.get("bot_version", "1.0")
-                        user_version = user_info.setdefault(chat_id, {}).get("last_version", "0")
+                        user_version = user_versions.get(chat_id, "0")
                         if user_version != current_version:
-                            # clear all sessions for this user
                             for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
                                               admin_add_mother_session, admin_add_mother_bulk_session,
                                               admin_approve_sessions, broadcast_sessions, rps_sessions]:
@@ -1535,9 +1539,9 @@ def handle_telegram_commands():
                             support_sessions.discard(chat_id)
                             send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু ব্যবহার করুন অথবা /start দিন।",
                                                   chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
-                            user_info[chat_id]["last_version"] = current_version
+                            user_versions[chat_id] = current_version
                             save_all()
-                            continue  # stop processing this message
+                            continue
 
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
@@ -1577,6 +1581,7 @@ def handle_telegram_commands():
                                                 transactions = data.get("transactions", [])
                                                 submitted_usernames = set(data.get("submitted_usernames", []))
                                                 rps_daily_wins = data.get("rps_daily_wins", {})
+                                                user_versions = data.get("user_versions", {})
                                             save_all()
                                             send_telegram_message("✅ ব্যাকআপ রিস্টোর সম্পন্ন।", ADMIN_CHAT_ID)
                                     except Exception as e:
@@ -1797,6 +1802,7 @@ def handle_telegram_commands():
                                     "transactions": transactions,
                                     "submitted_usernames": list(submitted_usernames),
                                     "rps_daily_wins": rps_daily_wins,
+                                    "user_versions": user_versions,
                                     "timestamp": datetime.datetime.now().isoformat()
                                 }
                             json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -2088,6 +2094,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 "transactions": transactions,
                 "submitted_usernames": list(submitted_usernames),
                 "rps_daily_wins": rps_daily_wins,
+                "user_versions": user_versions,
                 "timestamp": datetime.datetime.now().isoformat()
             }
         json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')

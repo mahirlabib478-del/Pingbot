@@ -69,16 +69,17 @@ config = {
     "bkash_number": "01XXXXXXXXX",
     "nagad_number": "01XXXXXXXXX",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
-    "maintenance_mode": False
+    "maintenance_mode": False,
+    "bot_version": "1.0"                # 👈 version for keyboard refresh
 }
 referrals = {}
 referral_bonuses = {}
 leaderboard = {}
 withdraw_requests = []
 deposit_requests = []
-transactions = []
-submitted_usernames = set()
-rps_daily_wins = {}
+transactions = []                      # transaction history
+submitted_usernames = set()            # duplicate check
+rps_daily_wins = {}                    # daily RPS reward counter
 
 # Session trackers
 submission_sessions = {}
@@ -89,7 +90,7 @@ withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
 broadcast_sessions = {}
-rps_sessions = {}
+rps_sessions = {}                      # track active RPS games
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -137,7 +138,8 @@ def load_all():
         "target_bonus": 2.0, "lock_2fa": False, "lock_cookies": False,
         "bkash_number": "01XXXXXXXXX", "nagad_number": "01XXXXXXXXX",
         "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
-        "maintenance_mode": False
+        "maintenance_mode": False,
+        "bot_version": "1.0"
     }
     loaded_config = load_json(CONFIG_FILE, default_config)
     for k in default_config:
@@ -557,7 +559,7 @@ def record_transaction(user_id, type_, amount, description):
             transactions[:] = transactions[-1000:]
         save_all()
 
-# ================== SUBMISSION SYSTEM ==================
+# ================== SUBMISSION SYSTEM (with duplicate check) ==================
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
     type_label = "🍪 কুকিজ একাউন্ট" if acc_type == "cookies" else "🔐 2FA একাউন্ট"
@@ -581,7 +583,7 @@ def process_submission_step(chat_id, text, sender_username):
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
             return True
-        # Duplicate check
+        # duplicate check
         duplicates = [u for u in lines if u in submitted_usernames]
         unique = [u for u in lines if u not in submitted_usernames]
         if duplicates:
@@ -615,7 +617,7 @@ def process_submission_step(chat_id, text, sender_username):
         if len(twofa_list) != len(session["usernames"]):
             send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
-        # Add to submitted set
+        # add to submitted set
         with data_lock:
             for u in session["usernames"]:
                 submitted_usernames.add(u)
@@ -1061,7 +1063,7 @@ def show_leaderboard(chat_id):
                                           for i, (uid, data) in enumerate(sorted_users, 1))
     send_telegram_message(msg, chat_id)
 
-# ================== WITHDRAW (updated) ==================
+# ================== WITHDRAW (dual payment) ==================
 def start_withdraw(chat_id):
     kb = {
         "inline_keyboard": [
@@ -1120,7 +1122,7 @@ def process_withdraw_step(chat_id, text):
         return True
     return False
 
-# ================== DEPOSIT SYSTEM (updated) ==================
+# ================== DEPOSIT SYSTEM (dual payment) ==================
 def start_deposit(chat_id):
     kb = {
         "inline_keyboard": [
@@ -1381,6 +1383,23 @@ def handle_telegram_commands():
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
                         answer_callback_query(cb["id"])
 
+                        # version refresh (same as message check but for callback)
+                        current_version = config.get("bot_version", "1.0")
+                        user_version = user_info.setdefault(chat_id, {}).get("last_version", "0")
+                        if user_version != current_version:
+                            # clear sessions
+                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
+                                              admin_add_mother_session, admin_add_mother_bulk_session,
+                                              admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                sess_dict.pop(chat_id, None)
+                            support_sessions.discard(chat_id)
+                            send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
+                                                  chat_id, reply_markup=get_main_keyboard(chat_id))
+                            user_info[chat_id]["last_version"] = current_version
+                            save_all()
+                            continue  # ignore the callback after refresh
+
+                        # existing callback handling
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
                             if ADMIN_CHAT_ID in broadcast_sessions:
                                 del broadcast_sessions[ADMIN_CHAT_ID]
@@ -1404,12 +1423,12 @@ def handle_telegram_commands():
                                 answer_callback_query(cb["id"], text="কোনো চলমান প্রক্রিয়া নেই।")
                             continue
 
-                        # RPS moves
+                        # RPS
                         if data.startswith("rps_"):
                             process_rps_callback(chat_id, data[4:])
                             continue
 
-                        # Existing callback handlers
+                        # submission, admin, mother, payment, history callbacks
                         if data == "sub_cookies":
                             start_submission(chat_id, "cookies") if not config.get("lock_cookies") else send_telegram_message("🔒 বন্ধ", chat_id)
                         elif data == "sub_2fa":
@@ -1442,8 +1461,6 @@ def handle_telegram_commands():
                                     save_all()
                                     show_mother_stock_detail_refresh(chat_id, cb["message"]["message_id"])
                                     send_telegram_message(f"🗑️ মাদার স্টক থেকে {deleted['username']} মুছে ফেলা হয়েছে।", ADMIN_CHAT_ID)
-                                else:
-                                    send_telegram_message("❌ আইটেম পাওয়া যায়নি।", ADMIN_CHAT_ID)
                         elif data.startswith("delfreemother_") and chat_id == ADMIN_CHAT_ID:
                             idx = int(data.split("_")[1])
                             with data_lock:
@@ -1452,8 +1469,6 @@ def handle_telegram_commands():
                                     save_all()
                                     show_free_mother_list_refresh(chat_id, cb["message"]["message_id"])
                                     send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট {deleted['username']} মুছে ফেলা হয়েছে।", ADMIN_CHAT_ID)
-                                else:
-                                    send_telegram_message("❌ আইটেম পাওয়া যায়নি।", ADMIN_CHAT_ID)
                         elif data.startswith("motherstock_page_") and chat_id == ADMIN_CHAT_ID:
                             page = int(data.split("_")[2])
                             message_id = cb["message"]["message_id"]
@@ -1470,7 +1485,6 @@ def handle_telegram_commands():
                             target = data[14:]
                             msg = get_profile_text(target)
                             send_telegram_message(msg, chat_id)
-                        # Payment method callbacks
                         elif data.startswith("depmethod_"):
                             method = data[10:]
                             deposit_sessions[chat_id] = {"step": "amount", "method": method}
@@ -1509,11 +1523,27 @@ def handle_telegram_commands():
                         from_user = msg.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
 
+                        # ---- BOT VERSION CHECK (force refresh) ----
+                        current_version = config.get("bot_version", "1.0")
+                        user_version = user_info.setdefault(chat_id, {}).get("last_version", "0")
+                        if user_version != current_version:
+                            # clear all sessions for this user
+                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
+                                              admin_add_mother_session, admin_add_mother_bulk_session,
+                                              admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                sess_dict.pop(chat_id, None)
+                            support_sessions.discard(chat_id)
+                            send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু ব্যবহার করুন অথবা /start দিন।",
+                                                  chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+                            user_info[chat_id]["last_version"] = current_version
+                            save_all()
+                            continue  # stop processing this message
+
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
                             continue
 
-                        # /restore
+                        # /restore (admin only)
                         if chat_id == ADMIN_CHAT_ID and text.strip().lower() == "/restore":
                             if "reply_to_message" not in msg or "document" not in msg["reply_to_message"]:
                                 send_telegram_message("📥 দয়া করে ব্যাকআপ .json.gz ফাইলে রিপ্লাই দিয়ে /restore লিখুন।", ADMIN_CHAT_ID)
@@ -1568,6 +1598,7 @@ def handle_telegram_commands():
                             send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", ADMIN_CHAT_ID, reply_markup=admin_panel_keyboard())
                             continue
 
+                        # active sessions: approval, deposit, submission, mother, withdraw
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_approve_sessions:
                             process_admin_approve_step(chat_id, text)
                             continue
@@ -1714,6 +1745,7 @@ def handle_telegram_commands():
                         elif text == "🎮 RPS গেম": start_rps(chat_id)
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
+                        # … (remaining admin panel buttons unchanged)
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
                             pending = [s for s in submissions if s["status"]=="pending"]
                             if not pending:

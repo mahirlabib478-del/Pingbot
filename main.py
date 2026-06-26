@@ -1391,7 +1391,7 @@ def handle_telegram_commands():
                         chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # version refresh (only private chat)
+                        # version refresh (only private)
                         if chat_type == "private":
                             current_version = config.get("bot_version", "1.0")
                             user_version = user_versions.get(chat_id, "0")
@@ -1857,7 +1857,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode
     parts = text.split()
     cmd = parts[0].lower()
-    from_user = msg.get("from", {}) if msg else {}
     if cmd == "/start":
         if chat_type == "private":
             with data_lock:
@@ -1870,20 +1869,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     save_all()
                     send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
         send_telegram_message("✨ স্বাগতম! নিচের বাটন ব্যবহার করুন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
-    elif cmd == "/stop":
-        user_id = str(from_user["id"]) if from_user else chat_id
-        with data_lock:
-            if user_id in subscribed_users:
-                subscribed_users.discard(user_id)
-                save_all()
-                send_telegram_message(
-                    "❌ আপনি আনসাবস্ক্রাইব করেছেন। আর কোনো ব্রডকাস্ট বা নোটিফিকেশন পাবেন না। তবে বটের অন্যান্য ফিচার ব্যবহার করতে পারবেন।",
-                    user_id
-                )
-                if chat_type != "private":
-                    send_telegram_message("✅ আপনার সাবস্ক্রিপশন বাতিল করা হয়েছে।", chat_id)
-            else:
-                send_telegram_message("⚠️ আপনি আগেই আনসাবস্ক্রাইব ছিলেন।", user_id)
     elif cmd == "/maintenance" and chat_id == ADMIN_CHAT_ID:
         args = text[len("/maintenance"):].strip().lower()
         if args in ["on","off"]:

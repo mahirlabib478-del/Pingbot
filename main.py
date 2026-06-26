@@ -8,6 +8,7 @@ import io
 import gzip
 import uuid
 import logging
+import random
 from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -38,6 +39,9 @@ REFERRALS_FILE = "referrals.json"
 REFERRAL_BONUSES_FILE = "referral_bonuses.json"
 LEADERBOARD_FILE = "leaderboard.json"
 DEPOSITS_FILE = "deposits.json"
+TRANSACTIONS_FILE = "transactions.json"
+DUPLICATE_USERNAMES_FILE = "duplicate_usernames.json"
+RPS_WINS_FILE = "rps_daily_wins.json"
 
 app = Flask(__name__)
 
@@ -63,6 +67,7 @@ config = {
     "lock_2fa": False,
     "lock_cookies": False,
     "bkash_number": "01XXXXXXXXX",
+    "nagad_number": "01XXXXXXXXX",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False
 }
@@ -71,6 +76,9 @@ referral_bonuses = {}
 leaderboard = {}
 withdraw_requests = []
 deposit_requests = []
+transactions = []
+submitted_usernames = set()
+rps_daily_wins = {}
 
 # Session trackers
 submission_sessions = {}
@@ -81,6 +89,7 @@ withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
 broadcast_sessions = {}
+rps_sessions = {}
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -109,6 +118,7 @@ def load_all():
     global mother_accounts, user_last_request, subscribed_users, user_info
     global user_balances, submissions, config, referrals, referral_bonuses, leaderboard
     global mother_stock, withdraw_requests, deposit_requests, maintenance_mode
+    global transactions, submitted_usernames, rps_daily_wins
 
     mother_accounts = load_json(MOTHER_FILE, [])
     user_last_request = load_json(COOLDOWN_FILE, {})
@@ -125,7 +135,8 @@ def load_all():
         "price_cookies": 3.5, "price_2fa": 3.0, "mother_price": 5.0,
         "referral_level1": 5.0, "referral_level2": 1.0, "monthly_target": 5000.0,
         "target_bonus": 2.0, "lock_2fa": False, "lock_cookies": False,
-        "bkash_number": "01XXXXXXXXX", "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
+        "bkash_number": "01XXXXXXXXX", "nagad_number": "01XXXXXXXXX",
+        "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
         "maintenance_mode": False
     }
     loaded_config = load_json(CONFIG_FILE, default_config)
@@ -136,7 +147,14 @@ def load_all():
     maintenance_mode = config.get("maintenance_mode", False)
 
     withdraw_requests = load_json("withdraw_requests.json", [])
+    for w in withdraw_requests:
+        if "method" not in w:
+            w["method"] = "bkash"
+            w["account_number"] = w.get("bkash", "")
     deposit_requests = load_json(DEPOSITS_FILE, [])
+    transactions = load_json(TRANSACTIONS_FILE, [])
+    submitted_usernames = set(load_json(DUPLICATE_USERNAMES_FILE, []))
+    rps_daily_wins = load_json(RPS_WINS_FILE, {})
 
 def save_all():
     save_json(MOTHER_FILE, mother_accounts)
@@ -151,6 +169,9 @@ def save_all():
     save_json(LEADERBOARD_FILE, leaderboard)
     save_json("withdraw_requests.json", withdraw_requests)
     save_json(DEPOSITS_FILE, deposit_requests)
+    save_json(TRANSACTIONS_FILE, transactions)
+    save_json(DUPLICATE_USERNAMES_FILE, list(submitted_usernames))
+    save_json(RPS_WINS_FILE, rps_daily_wins)
     save_json(CONFIG_FILE, config)
     save_data_to_channel()
 
@@ -233,6 +254,9 @@ def save_data_to_channel():
                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                     "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
                     "deposit_requests": deposit_requests, "user_last_request": user_last_request,
+                    "transactions": transactions,
+                    "submitted_usernames": list(submitted_usernames),
+                    "rps_daily_wins": rps_daily_wins,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -279,6 +303,7 @@ def auto_restore_from_channel():
         with data_lock:
             global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
             global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
+            global transactions, submitted_usernames, rps_daily_wins
             subscribed_users = set(data.get("subscribed_users", []))
             user_info = data.get("user_info", {})
             user_balances = data.get("user_balances", {})
@@ -292,6 +317,9 @@ def auto_restore_from_channel():
             withdraw_requests = data.get("withdraw_requests", [])
             deposit_requests = data.get("deposit_requests", [])
             user_last_request = data.get("user_last_request", {})
+            transactions = data.get("transactions", [])
+            submitted_usernames = set(data.get("submitted_usernames", []))
+            rps_daily_wins = data.get("rps_daily_wins", {})
             last_backup_message_id = pinned["message_id"]
         save_all()
     except Exception as e:
@@ -299,17 +327,16 @@ def auto_restore_from_channel():
 
 # ================== KEYBOARDS ==================
 def get_main_keyboard(chat_id, chat_type="private"):
-    kb = []
     if chat_type != "private":
-        kb = [["📊 লিডারবোর্ড", "👥 রেফারেল"]]
-    else:
-        kb = [
-            ["💼 একাউন্ট সাবমিট", "👤 প্রোফাইল"],
-            ["👥 রেফারেল", "💰 ব্যালেন্স"],
-            ["💳 ডিপোজিট", "💸 উইথড্র"],
-            ["📊 লিডারবোর্ড", "🎁 ফ্রি মাদার একাউন্ট"],
-            ["🛒 মাদার একাউন্ট কিনুন", "📞 সাপোর্ট"]
-        ]
+        return {"keyboard": [["📊 লিডারবোর্ড", "👥 রেফারেল"]], "resize_keyboard": True}
+    kb = [
+        ["💼 একাউন্ট সাবমিট", "👤 প্রোফাইল"],
+        ["👥 রেফারেল", "💰 ব্যালেন্স"],
+        ["💳 ডিপোজিট", "💸 উইথড্র"],
+        ["📊 লিডারবোর্ড", "🎁 ফ্রি মাদার একাউন্ট"],
+        ["🛒 মাদার একাউন্ট কিনুন", "📞 সাপোর্ট"],
+        ["🎮 RPS গেম"]
+    ]
     if str(chat_id) == ADMIN_CHAT_ID:
         kb.append(["🛠️ অ্যাডমিন প্যানেল"])
     return {"keyboard": kb, "resize_keyboard": True}
@@ -324,7 +351,8 @@ def admin_panel_keyboard():
             ["📋 ইউজার লিস্ট", "✉️ ইউজারকে মেসেজ"],
             ["📁 ব্যাকআপ", "📥 রিস্টোর"],
             ["📥 ডিপোজিট রিকোয়েস্ট", "💳 উইথড্র রিকোয়েস্ট"],
-            ["💳 বিকাশ নম্বর সেট", "🔙 মূল মেনু"]
+            ["💳 বিকাশ নম্বর সেট", "💳 নগদ নম্বর সেট"],
+            ["🔙 মূল মেনু"]
         ],
         "resize_keyboard": True
     }
@@ -512,6 +540,23 @@ def get_profile_text(uid):
 
     return msg
 
+# ================== TRANSACTION HISTORY ==================
+def record_transaction(user_id, type_, amount, description):
+    txn = {
+        "id": f"txn_{uuid.uuid4().hex[:8]}",
+        "user_id": str(user_id),
+        "type": type_,
+        "amount": amount,
+        "balance_after": user_balances.get(str(user_id), 0),
+        "timestamp": time.time(),
+        "description": description
+    }
+    with data_lock:
+        transactions.append(txn)
+        if len(transactions) > 1000:
+            transactions[:] = transactions[-1000:]
+        save_all()
+
 # ================== SUBMISSION SYSTEM ==================
 def start_submission(chat_id, acc_type):
     submission_sessions[chat_id] = {"step": "username", "type": acc_type}
@@ -536,9 +581,21 @@ def process_submission_step(chat_id, text, sender_username):
         if not lines:
             send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
             return True
-        session["usernames"] = lines
+        # Duplicate check
+        duplicates = [u for u in lines if u in submitted_usernames]
+        unique = [u for u in lines if u not in submitted_usernames]
+        if duplicates:
+            send_telegram_message(
+                f"⚠️ {len(duplicates)} টি ইউজারনেম আগেই জমা হয়েছে। শুধু নতুন {len(unique)} টি নেওয়া হবে।",
+                chat_id, reply_markup=cancel_kb
+            )
+        if not unique:
+            send_telegram_message("❌ সমস্ত ইউজারনেম ডুপ্লিকেট! সাবমিট বাতিল।", chat_id)
+            del submission_sessions[chat_id]
+            return True
+        session["usernames"] = unique
         session["step"] = "password"
-        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(lines)}",
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
                              chat_id, reply_markup=cancel_kb)
         return True
     elif step == "password":
@@ -558,6 +615,11 @@ def process_submission_step(chat_id, text, sender_username):
         if len(twofa_list) != len(session["usernames"]):
             send_telegram_message(f"❌ 2FA কী সংখ্যা ({len(twofa_list)}) ইউজারনেম সংখ্যার সাথে মেলে না।", chat_id, reply_markup=cancel_kb)
             return True
+        # Add to submitted set
+        with data_lock:
+            for u in session["usernames"]:
+                submitted_usernames.add(u)
+            save_all()
         acc_type = session["type"]
         type_label = "কুকিজ" if acc_type == "cookies" else "2FA"
         filename = f"{sender_username}_{chat_id}_{len(session['usernames'])}pcs_{type_label}.xlsx"
@@ -633,6 +695,7 @@ def process_admin_approve_step(chat_id, text):
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
                 add_ok(user_id, acc_type, ok_count, amount)
                 distribute_referral_bonus(user_id, amount)
+                record_transaction(user_id, "submission_earning", amount, f"{acc_type.upper()} OK ({ok_count} pcs)")
                 save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
                 send_telegram_message(f"🎉 আপনার {ok_count} টি আইডি ওকে হয়েছে! {amount} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", user_id)
@@ -649,6 +712,7 @@ def distribute_referral_bonus(user_id, amount):
         if bonus1 > 0:
             user_balances[referrer] = user_balances.get(referrer, 0) + bonus1
             referral_bonuses[referrer] = referral_bonuses.get(referrer, 0) + bonus1
+            record_transaction(referrer, "referral_bonus", bonus1, f"Referral Level 1 from {user_id}")
             send_telegram_message(f"🎁 রেফারেল বোনাস: {bonus1} টাকা ({config['referral_level1']}%) পেয়েছেন!", referrer)
             update_leaderboard_income(referrer, bonus1)
         if referrer in referrals:
@@ -657,6 +721,7 @@ def distribute_referral_bonus(user_id, amount):
             if bonus2 > 0:
                 user_balances[grand_referrer] = user_balances.get(grand_referrer, 0) + bonus2
                 referral_bonuses[grand_referrer] = referral_bonuses.get(grand_referrer, 0) + bonus2
+                record_transaction(grand_referrer, "referral_bonus", bonus2, f"Referral Level 2 from {user_id}")
                 send_telegram_message(f"🎁 রেফারেল বোনাস (লেভেল ২): {bonus2} টাকা ({config['referral_level2']}%) পেয়েছেন!", grand_referrer)
                 update_leaderboard_income(grand_referrer, bonus2)
 
@@ -678,6 +743,7 @@ def handle_get_free_mother(chat_id):
                 acc["assigned_to"] = str(chat_id)
                 acc["assigned_at"] = now
                 user_last_request[str(chat_id)] = now
+                record_transaction(chat_id, "free_mother", 0, f"Free mother account: {acc['username']}")
                 save_all()
                 msg = f"🎁 ফ্রি মাদার একাউন্ট:\n👤 ইউজারনেম: {acc['username']}\n🔑 পাসওয়ার্ড: {acc['password']}"
                 if acc.get("fa_key"): msg += f"\n🔐 2FA: {acc['fa_key']}"
@@ -737,6 +803,7 @@ def process_mother_buy_step(chat_id, text):
                 new_stock.append(acc)
         mother_stock[:] = new_stock
         user_balances[str(chat_id)] = bal - total
+        record_transaction(chat_id, "mother_purchase", -total, f"Bought {qty} mother accounts")
         save_all()
     excel = generate_mother_purchase_excel(to_buy)
     if send_telegram_document(excel, f"mother_{chat_id}_{int(time.time())}.xlsx", chat_id, caption=f"{qty} টি মাদার একাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা"):
@@ -975,7 +1042,10 @@ def show_free_mother_list_refresh(chat_id, message_id, page=None):
 def show_profile(chat_id):
     try:
         msg = get_profile_text(chat_id)
-        inline_kb = {"inline_keyboard": [[{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}]]}
+        inline_kb = {"inline_keyboard": [
+            [{"text": "🎯 টার্গেট সেট করুন", "callback_data": "set_target"}],
+            [{"text": "📜 ইতিহাস", "callback_data": "show_history"}]
+        ]}
         send_telegram_message(msg, chat_id, reply_markup=inline_kb)
     except Exception as e:
         logger.error(f"show_profile error for {chat_id}: {e}")
@@ -991,11 +1061,16 @@ def show_leaderboard(chat_id):
                                           for i, (uid, data) in enumerate(sorted_users, 1))
     send_telegram_message(msg, chat_id)
 
-# ================== WITHDRAW ==================
+# ================== WITHDRAW (updated) ==================
 def start_withdraw(chat_id):
-    withdraw_sessions[chat_id] = {"step": "amount"}
-    send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id,
-                         reply_markup={"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]})
+    kb = {
+        "inline_keyboard": [
+            [{"text": "💸 বিকাশ", "callback_data": "withmethod_bkash"}],
+            [{"text": "💸 নগদ", "callback_data": "withmethod_nagad"}],
+            [{"text": "❌ বাতিল", "callback_data": "cancel_session"}]
+        ]
+    }
+    send_telegram_message("💸 উইথড্রের মাধ্যম বাছাই করুন:", chat_id, reply_markup=kb)
 
 def process_withdraw_step(chat_id, text):
     if chat_id not in withdraw_sessions: return False
@@ -1004,8 +1079,9 @@ def process_withdraw_step(chat_id, text):
         send_telegram_message("❌ উইথড্র বাতিল করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
         return True
     session = withdraw_sessions[chat_id]
+    step = session["step"]
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
-    if session["step"] == "amount":
+    if step == "amount":
         try:
             amount = float(text.strip())
             if amount <= 0: raise ValueError
@@ -1017,36 +1093,43 @@ def process_withdraw_step(chat_id, text):
             del withdraw_sessions[chat_id]
             return True
         session["amount"] = amount
-        session["step"] = "bkash"
-        send_telegram_message("📞 আপনার বিকাশ নম্বর দিন:", chat_id, reply_markup=cancel_kb)
+        session["step"] = "account"
+        method_label = session["method"].upper()
+        send_telegram_message(f"📞 আপনার {method_label} অ্যাকাউন্ট নম্বর দিন:", chat_id, reply_markup=cancel_kb)
         return True
-    else:
-        bkash = text.strip()
-        if not bkash:
-            send_telegram_message("⚠️ বিকাশ নম্বর খালি রাখা যাবে না।", chat_id, reply_markup=cancel_kb)
+    elif step == "account":
+        account = text.strip()
+        if not account:
+            send_telegram_message("⚠️ নম্বর খালি রাখা যাবে না।", chat_id, reply_markup=cancel_kb)
             return True
         w_id = uuid.uuid4().hex[:10]
-        withdraw_requests.append({"id": w_id, "user_id": chat_id, "amount": session["amount"], "bkash": bkash,
-                                  "status": "pending", "time": time.time()})
+        withdraw_requests.append({
+            "id": w_id, "user_id": chat_id, "amount": session["amount"],
+            "method": session["method"], "account_number": account,
+            "status": "pending", "time": time.time()
+        })
         save_all()
         del withdraw_sessions[chat_id]
         send_telegram_message(f"✅ {session['amount']} টাকা উইথড্র রিকোয়েস্ট জমা হয়েছে।", chat_id)
-        send_telegram_message(f"💳 নতুন উইথড্র রিকোয়েস্ট\nআইডি: {w_id}\nইউজার: {user_info.get(chat_id, chat_id)}\n"
-                             f"পরিমাণ: {session['amount']}\nবিকাশ: {bkash}\n/approvewithdraw {w_id} or /rejectwithdraw {w_id}",
-                             ADMIN_CHAT_ID)
+        send_telegram_message(
+            f"💳 নতুন উইথড্র রিকোয়েস্ট\nআইডি: {w_id}\nইউজার: {user_info.get(chat_id, chat_id)}\n"
+            f"পরিমাণ: {session['amount']}\nমাধ্যম: {session['method'].upper()}\nঅ্যাকাউন্ট: {account}\n"
+            f"/approvewithdraw {w_id} or /rejectwithdraw {w_id}",
+            ADMIN_CHAT_ID)
         send_telegram_message("🔝", chat_id, reply_markup=get_main_keyboard(chat_id))
         return True
+    return False
 
-# ================== DEPOSIT SYSTEM ==================
+# ================== DEPOSIT SYSTEM (updated) ==================
 def start_deposit(chat_id):
-    deposit_sessions[chat_id] = {"step": "amount"}
-    bkash = config.get("bkash_number", "সেট করা হয়নি")
-    cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
-    send_telegram_message(
-        f"💳 ডিপোজিট\n\nআপনার বিকাশ নম্বর থেকে {bkash} নম্বরে টাকা পাঠিয়ে নিচে ট্রানজেকশন আইডি দিন।\n\n"
-        "প্রথমে কত টাকা পাঠিয়েছেন তা লিখুন (শুধু সংখ্যা):\nবাতিল করতে /cancel",
-        chat_id, reply_markup=cancel_kb
-    )
+    kb = {
+        "inline_keyboard": [
+            [{"text": "💰 বিকাশ", "callback_data": "depmethod_bkash"}],
+            [{"text": "💰 নগদ", "callback_data": "depmethod_nagad"}],
+            [{"text": "❌ বাতিল", "callback_data": "cancel_session"}]
+        ]
+    }
+    send_telegram_message("💳 ডিপোজিটের মাধ্যম বাছাই করুন:", chat_id, reply_markup=kb)
 
 def process_deposit_step(chat_id, text):
     if chat_id not in deposit_sessions: return False
@@ -1066,7 +1149,11 @@ def process_deposit_step(chat_id, text):
             return True
         session["amount"] = amount
         session["step"] = "trxid"
-        send_telegram_message("🔢 এখন আপনার বিকাশ ট্রানজেকশন আইডি (TrxID) দিন:", chat_id, reply_markup=cancel_kb)
+        method = session["method"]
+        number = config.get(f"{method}_number", "সেট করা হয়নি")
+        send_telegram_message(
+            f"🔢 এখন আপনার {method.upper()} ট্রানজেকশন আইডি (TrxID) দিন:\n(আপনার {method.upper()} নম্বর থেকে {number} নম্বরে টাকা পাঠিয়ে TrxID দিন)",
+            chat_id, reply_markup=cancel_kb)
         return True
     elif step == "trxid":
         trxid = text.strip()
@@ -1075,17 +1162,20 @@ def process_deposit_step(chat_id, text):
             return True
         amount = session["amount"]
         dep_id = uuid.uuid4().hex[:10]
-        dep_req = {"id": dep_id, "user_id": chat_id, "amount": amount, "trxid": trxid,
-                   "status": "pending", "time": time.time()}
+        dep_req = {
+            "id": dep_id, "user_id": chat_id, "amount": amount,
+            "trxid": trxid, "method": session["method"],
+            "status": "pending", "time": time.time()
+        }
         with data_lock:
             deposit_requests.append(dep_req)
             save_all()
         del deposit_sessions[chat_id]
         send_telegram_message(
-            f"✅ আপনার {amount} টাকার ডিপোজিট রিকোয়েস্ট জমা হয়েছে।\nট্রানজেকশন আইডি: {trxid}\nঅ্যাডমিন অনুমোদন করলেই ব্যালেন্স যোগ হবে।",
+            f"✅ আপনার {amount} টাকার ডিপোজিট রিকোয়েস্ট ({session['method'].upper()}) জমা হয়েছে।\nট্রানজেকশন আইডি: {trxid}\nঅ্যাডমিন অনুমোদন করলেই ব্যালেন্স যোগ হবে।",
             chat_id)
         admin_msg = (f"📥 নতুন ডিপোজিট রিকোয়েস্ট\nআইডি: {dep_id}\nইউজার: {user_info.get(chat_id, chat_id)} ({chat_id})\n"
-                     f"পরিমাণ: {amount} টাকা\nট্রানজেকশন আইডি: {trxid}\n"
+                     f"পরিমাণ: {amount} টাকা\nমাধ্যম: {session['method'].upper()}\nট্রানজেকশন আইডি: {trxid}\n"
                      f"অনুমোদন: /approvedeposit {dep_id}\nবাতিল: /rejectdeposit {dep_id}")
         send_telegram_message(admin_msg, ADMIN_CHAT_ID)
         send_telegram_message("🔝", chat_id, reply_markup=get_main_keyboard(chat_id))
@@ -1119,7 +1209,6 @@ def forward_support_message(chat_id, msg):
 
 # ================== ADMIN BROADCAST ==================
 def admin_broadcast_prompt(chat_id):
-    # Fixed: "bc_file" -> "bc_document" to match the document type
     kb = {
         "inline_keyboard": [
             [{"text": "📝 টেক্সট", "callback_data": "bc_text"}],
@@ -1131,22 +1220,157 @@ def admin_broadcast_prompt(chat_id):
     }
     send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id, reply_markup=kb)
 
+# ================== RPS GAME ==================
+def start_rps(chat_id):
+    today = str(datetime.date.today())
+    with data_lock:
+        if chat_id not in rps_daily_wins or rps_daily_wins[chat_id].get("date") != today:
+            rps_daily_wins[chat_id] = {"date": today, "wins": 0}
+            save_all()
+    rps_sessions[chat_id] = True
+    kb = {
+        "inline_keyboard": [
+            [{"text": "🪨 Rock", "callback_data": "rps_rock"},
+             {"text": "📄 Paper", "callback_data": "rps_paper"},
+             {"text": "✂️ Scissors", "callback_data": "rps_scissors"}],
+            [{"text": "❌ বাতিল", "callback_data": "cancel_session"}]
+        ]
+    }
+    send_telegram_message("🎮 Rock Paper Scissors!\nআপনার পছন্দ বাছাই করুন:", chat_id, reply_markup=kb)
+
+def process_rps_callback(chat_id, user_choice):
+    if chat_id not in rps_sessions:
+        return
+    del rps_sessions[chat_id]
+    choices = ["rock", "paper", "scissors"]
+    bot_choice = random.choice(choices)
+    win_map = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+    if user_choice == bot_choice:
+        result = "draw"
+    elif win_map[user_choice] == bot_choice:
+        result = "win"
+    else:
+        result = "lose"
+
+    emoji = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+    msg = f"আপনি: {emoji[user_choice]}, বট: {emoji[bot_choice]}\n\n"
+    if result == "win":
+        msg += "🎉 আপনি জিতেছেন!"
+        with data_lock:
+            wins_today = rps_daily_wins.get(chat_id, {"wins":0})["wins"]
+            if wins_today < 3:
+                rps_daily_wins[chat_id]["wins"] = wins_today + 1
+                save_all()
+                mother = None
+                for acc in mother_accounts:
+                    if not acc.get("assigned_to"):
+                        mother = acc
+                        break
+                if mother:
+                    mother["assigned_to"] = str(chat_id)
+                    mother["assigned_at"] = time.time()
+                    record_transaction(chat_id, "rps_reward", 0, f"RPS Game: Free mother account {mother['username']}")
+                    reward_text = f"🎁 ফ্রি মাদার একাউন্ট: {mother['username']} / {mother['password']}"
+                    if mother.get("fa_key"):
+                        reward_text += f"\n🔐 2FA: {mother['fa_key']}"
+                else:
+                    user_balances[chat_id] = user_balances.get(chat_id, 0) + 5
+                    record_transaction(chat_id, "rps_reward", 5, "RPS Game: 5 TK bonus")
+                    reward_text = "💰 ৫ টাকা ব্যালেন্সে যোগ হয়েছে।"
+                msg += f"\n{reward_text}\n(আজকের পুরস্কার {rps_daily_wins[chat_id]['wins']}/3 ব্যবহৃত)"
+            else:
+                msg += "\nদুঃখিত, আজ পুরস্কার শেষ। তারপরও ভালো খেলেছেন!"
+    elif result == "draw":
+        msg += "🤝 ড্র!"
+    else:
+        msg += "😞 আপনি হেরেছেন। আবার চেষ্টা করুন!"
+
+    send_telegram_message(msg, chat_id, reply_markup=get_main_keyboard(chat_id))
+
+# ================== INLINE MODE ==================
+def handle_inline_query(inline_query):
+    query_id = inline_query["id"]
+    query_text = inline_query.get("query", "").strip()
+    results = []
+    if not query_text:
+        results.append({
+            "type": "article",
+            "id": "1",
+            "title": "একাউন্ট সাবমিট করুন",
+            "input_message_content": {
+                "message_text": "💼 একাউন্ট সাবমিট করতে চাপুন:"
+            },
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "সাবমিট করুন", "url": f"https://t.me/{BOT_USERNAME}"}]]
+            }
+        })
+        results.append({
+            "type": "article",
+            "id": "2",
+            "title": "RPS গেম খেলুন",
+            "input_message_content": {
+                "message_text": "🎮 RPS গেম খেলতে চাপুন:"
+            },
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "খেলুন", "url": f"https://t.me/{BOT_USERNAME}?start=rps"}]]
+            }
+        })
+        results.append({
+            "type": "article",
+            "id": "3",
+            "title": "প্রোফাইল দেখুন",
+            "input_message_content": {
+                "message_text": "👤 প্রোফাইল দেখতে চাপুন:"
+            },
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "প্রোফাইল", "url": f"https://t.me/{BOT_USERNAME}"}]]
+            }
+        })
+    else:
+        results.append({
+            "type": "article",
+            "id": "search",
+            "title": f"Search: {query_text}",
+            "input_message_content": {
+                "message_text": f"🔍 {query_text} এর জন্য বটে যান:"
+            },
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "বট খুলুন", "url": f"https://t.me/{BOT_USERNAME}"}]]
+            }
+        })
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerInlineQuery"
+    payload = {
+        "inline_query_id": query_id,
+        "results": json.dumps(results),
+        "cache_time": 0
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"Inline answer error: {e}")
+
 # ================== MAIN TELEGRAM HANDLER ==================
 def handle_telegram_commands():
     global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
     global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
-    global maintenance_mode, last_update_id
+    global maintenance_mode, last_update_id, transactions, submitted_usernames, rps_daily_wins
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     while True:
         try:
-            params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+            params = {"timeout": 30, "allowed_updates": ["message", "callback_query", "inline_query"]}
             if last_update_id:
                 params["offset"] = last_update_id + 1
             resp = requests.get(url, params=params, timeout=35).json()
             if resp.get("ok") and resp.get("result"):
                 for update in resp["result"]:
                     last_update_id = update["update_id"]
+
+                    # ========== INLINE QUERY ==========
+                    if "inline_query" in update:
+                        handle_inline_query(update["inline_query"])
+                        continue
 
                     # ========== CALLBACK QUERY ==========
                     if "callback_query" in update:
@@ -1165,7 +1389,7 @@ def handle_telegram_commands():
 
                         if data == "cancel_session":
                             cancelled = False
-                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, admin_add_mother_session, admin_add_mother_bulk_session, admin_approve_sessions, broadcast_sessions]:
+                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, admin_add_mother_session, admin_add_mother_bulk_session, admin_approve_sessions, broadcast_sessions, rps_sessions]:
                                 if chat_id in sess_dict:
                                     del sess_dict[chat_id]
                                     cancelled = True
@@ -1180,6 +1404,12 @@ def handle_telegram_commands():
                                 answer_callback_query(cb["id"], text="কোনো চলমান প্রক্রিয়া নেই।")
                             continue
 
+                        # RPS moves
+                        if data.startswith("rps_"):
+                            process_rps_callback(chat_id, data[4:])
+                            continue
+
+                        # Existing callback handlers
                         if data == "sub_cookies":
                             start_submission(chat_id, "cookies") if not config.get("lock_cookies") else send_telegram_message("🔒 বন্ধ", chat_id)
                         elif data == "sub_2fa":
@@ -1240,6 +1470,34 @@ def handle_telegram_commands():
                             target = data[14:]
                             msg = get_profile_text(target)
                             send_telegram_message(msg, chat_id)
+                        # Payment method callbacks
+                        elif data.startswith("depmethod_"):
+                            method = data[10:]
+                            deposit_sessions[chat_id] = {"step": "amount", "method": method}
+                            number = config.get(f"{method}_number", "সেট করা হয়নি")
+                            cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+                            send_telegram_message(
+                                f"আপনার {method.upper()} নম্বর থেকে **{number}** নম্বরে টাকা পাঠিয়ে নিচে ট্রানজেকশন আইডি দিন।\n\n"
+                                "প্রথমে কত টাকা পাঠিয়েছেন তা লিখুন (শুধু সংখ্যা):\nবাতিল করতে /cancel",
+                                chat_id, reply_markup=cancel_kb
+                            )
+                        elif data.startswith("withmethod_"):
+                            method = data[11:]
+                            withdraw_sessions[chat_id] = {"step": "amount", "method": method}
+                            cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
+                            send_telegram_message("💸 কত টাকা উইথড্র করতে চান? (শুধু সংখ্যা লিখুন)\nবাতিল করতে /cancel", chat_id, reply_markup=cancel_kb)
+                        elif data == "show_history":
+                            user_txns = [t for t in transactions if t["user_id"] == chat_id]
+                            if not user_txns:
+                                send_telegram_message("আপনার কোনো ট্রানজেকশন ইতিহাস নেই।", chat_id)
+                            else:
+                                recent = user_txns[-10:]
+                                lines = ["📜 **সাম্প্রতিক ট্রানজেকশন:**\n"]
+                                for t in reversed(recent):
+                                    sign = "+" if t["amount"] >= 0 else ""
+                                    date_str = datetime.datetime.fromtimestamp(t["timestamp"]).strftime("%d/%m/%Y %H:%M")
+                                    lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
+                                send_telegram_message("\n".join(lines), chat_id)
                         continue
 
                     # ========== MESSAGE ==========
@@ -1255,7 +1513,7 @@ def handle_telegram_commands():
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
                             continue
 
-                        # ====== /restore (একদম আগে চেক) ======
+                        # /restore
                         if chat_id == ADMIN_CHAT_ID and text.strip().lower() == "/restore":
                             if "reply_to_message" not in msg or "document" not in msg["reply_to_message"]:
                                 send_telegram_message("📥 দয়া করে ব্যাকআপ .json.gz ফাইলে রিপ্লাই দিয়ে /restore লিখুন।", ADMIN_CHAT_ID)
@@ -1286,23 +1544,25 @@ def handle_telegram_commands():
                                                 deposit_requests = data.get("deposit_requests", [])
                                                 user_last_request = data.get("user_last_request", {})
                                                 maintenance_mode = data.get("maintenance_mode", False)
+                                                transactions = data.get("transactions", [])
+                                                submitted_usernames = set(data.get("submitted_usernames", []))
+                                                rps_daily_wins = data.get("rps_daily_wins", {})
                                             save_all()
                                             send_telegram_message("✅ ব্যাকআপ রিস্টোর সম্পন্ন।", ADMIN_CHAT_ID)
                                     except Exception as e:
                                         send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
-                        # -------- সাপোর্ট ভিতর /cancel --------
+                        # support / cancel inside support
                         if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             support_sessions.discard(chat_id)
                             send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                             continue
-
                         if chat_id in support_sessions:
                             forward_support_message(chat_id, msg)
                             continue
 
-                        # -------- ব্রডকাস্ট মোডে কমান্ড /cancel --------
+                        # broadcast cancel
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in broadcast_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             del broadcast_sessions[ADMIN_CHAT_ID]
                             send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", ADMIN_CHAT_ID, reply_markup=admin_panel_keyboard())
@@ -1345,16 +1605,14 @@ def handle_telegram_commands():
                         if chat_id in admin_add_mother_session:
                             process_add_mother_step(chat_id, text)
                             continue
-
                         if chat_id in admin_add_mother_bulk_session:
                             process_add_mother_bulk_step(chat_id, text)
                             continue
-
                         if chat_id in withdraw_sessions:
                             process_withdraw_step(chat_id, text)
                             continue
 
-                        # ====== BROADCAST CONTENT ======
+                        # broadcast content
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in broadcast_sessions:
                             btype = broadcast_sessions[ADMIN_CHAT_ID]["type"]
                             if not subscribed_users:
@@ -1382,7 +1640,7 @@ def handle_telegram_commands():
                                     send_telegram_message("⚠️ সঠিক মিডিয়া পাঠান।", ADMIN_CHAT_ID)
                             continue
 
-                        # ====== /send কমান্ড ======
+                        # /send command
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
                             parts = text.split(maxsplit=2)
                             if len(parts) < 2 or not parts[1].isdigit():
@@ -1426,7 +1684,7 @@ def handle_telegram_commands():
                                     send_telegram_message("/send <user_id> <টেক্সট>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
                             continue
 
-                        # ====== বাটন হ্যান্ডলিং ======
+                        # button handling
                         if chat_type != "private" and text in [
                             "💼 একাউন্ট সাবমিট", "👤 প্রোফাইল", "💰 ব্যালেন্স",
                             "💳 ডিপোজিট", "💸 উইথড্র", "🎁 ফ্রি মাদার একাউন্ট",
@@ -1453,6 +1711,7 @@ def handle_telegram_commands():
                         elif text == "🎁 ফ্রি মাদার একাউন্ট": handle_get_free_mother(chat_id)
                         elif text == "🛒 মাদার একাউন্ট কিনুন": start_buy_mother(chat_id)
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
+                        elif text == "🎮 RPS গেম": start_rps(chat_id)
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
@@ -1503,6 +1762,9 @@ def handle_telegram_commands():
                                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                                     "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
                                     "deposit_requests": deposit_requests, "user_last_request": user_last_request,
+                                    "transactions": transactions,
+                                    "submitted_usernames": list(submitted_usernames),
+                                    "rps_daily_wins": rps_daily_wins,
                                     "timestamp": datetime.datetime.now().isoformat()
                                 }
                             json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -1519,8 +1781,9 @@ def handle_telegram_commands():
                                 send_telegram_message("কোনো পেন্ডিং ডিপোজিট রিকোয়েস্ট নেই।", chat_id)
                             else:
                                 for d in pending:
+                                    method_str = d.get("method", "bkash").upper()
                                     send_telegram_message(
-                                        f"📥 ডিপোজিট আইডি: {d['id']}\nইউজার: {d['user_id']}\nপরিমাণ: {d['amount']} টাকা\nট্রানজেকশন: {d['trxid']}\n"
+                                        f"📥 ডিপোজিট আইডি: {d['id']}\nইউজার: {d['user_id']}\nপরিমাণ: {d['amount']} টাকা\nমাধ্যম: {method_str}\nট্রানজেকশন: {d['trxid']}\n"
                                         f"/approvedeposit {d['id']} বা /rejectdeposit {d['id']}", chat_id)
                         elif text == "💳 উইথড্র রিকোয়েস্ট" and chat_id == ADMIN_CHAT_ID:
                             pending = [w for w in withdraw_requests if w["status"] == "pending"]
@@ -1528,11 +1791,15 @@ def handle_telegram_commands():
                                 send_telegram_message("কোনো পেন্ডিং উইথড্র রিকোয়েস্ট নেই।", chat_id)
                             else:
                                 for w in pending:
+                                    method_str = w.get("method", "bkash").upper()
+                                    acc = w.get("account_number", w.get("bkash", ""))
                                     send_telegram_message(
-                                        f"💳 উইথড্র আইডি: {w['id']}\nইউজার: {w['user_id']}\nপরিমাণ: {w['amount']} টাকা\nবিকাশ: {w['bkash']}\n"
+                                        f"💳 উইথড্র আইডি: {w['id']}\nইউজার: {w['user_id']}\nপরিমাণ: {w['amount']} টাকা\nমাধ্যম: {method_str}\nঅ্যাকাউন্ট: {acc}\n"
                                         f"/approvewithdraw {w['id']} বা /rejectwithdraw {w['id']}", chat_id)
                         elif text == "💳 বিকাশ নম্বর সেট" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("বিকাশ নম্বর সেট করতে কমান্ড:\n/setbkash <নম্বর>", chat_id)
+                        elif text == "💳 নগদ নম্বর সেট" and chat_id == ADMIN_CHAT_ID:
+                            send_telegram_message("নগদ নম্বর সেট করতে কমান্ড:\n/setnagad <নম্বর>", chat_id)
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                         elif text.startswith("/"):
@@ -1597,12 +1864,18 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         except: send_telegram_message("/setreferral level1/level2 <শতাংশ>", chat_id)
     elif cmd == "/setbkash" and chat_id == ADMIN_CHAT_ID:
         if len(parts) > 1:
-            number = parts[1]
-            config["bkash_number"] = number
+            config["bkash_number"] = parts[1]
             save_all()
-            send_telegram_message(f"✅ বিকাশ নম্বর {number} সেট করা হয়েছে।", chat_id)
+            send_telegram_message(f"✅ বিকাশ নম্বর {parts[1]} সেট করা হয়েছে।", chat_id)
         else:
             send_telegram_message("/setbkash <নম্বর>", chat_id)
+    elif cmd == "/setnagad" and chat_id == ADMIN_CHAT_ID:
+        if len(parts) > 1:
+            config["nagad_number"] = parts[1]
+            save_all()
+            send_telegram_message(f"✅ নগদ নম্বর {parts[1]} সেট করা হয়েছে।", chat_id)
+        else:
+            send_telegram_message("/setnagad <নম্বর>", chat_id)
     elif cmd == "/addmother" and chat_id == ADMIN_CHAT_ID:
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /addmother username password [2fa_key]", chat_id)
@@ -1708,6 +1981,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     user_id = dep["user_id"]
                     user_balances[user_id] = user_balances.get(user_id, 0) + dep["amount"]
                     dep["status"] = "approved"
+                    method_str = dep.get("method", "bkash").upper()
+                    record_transaction(user_id, "deposit", dep["amount"], f"Deposit via {method_str} - TrxID: {dep['trxid']}")
                     save_all()
                     send_telegram_message(f"✅ ডিপোজিট {dep_id} অনুমোদিত। {dep['amount']} টাকা যোগ হয়েছে।", ADMIN_CHAT_ID)
                     send_telegram_message(f"✅ আপনার {dep['amount']} টাকার ডিপোজিট অনুমোদিত হয়েছে। বর্তমান ব্যালেন্স: {user_balances[user_id]} টাকা", user_id)
@@ -1726,13 +2001,17 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     break
             else: send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি।", ADMIN_CHAT_ID)
     elif cmd == "/approvewithdraw" and chat_id == ADMIN_CHAT_ID:
-        w_id = parts[1] if len(parts) > 1 else None
+        if len(parts) < 2: send_telegram_message("/approvewithdraw <id>", chat_id); return
+        w_id = parts[1]
         with data_lock:
             for w in withdraw_requests:
                 if w["id"] == w_id and w["status"] == "pending":
                     if user_balances.get(w["user_id"],0) >= w["amount"]:
                         user_balances[w["user_id"]] -= w["amount"]
                         w["status"] = "approved"
+                        method_str = w.get("method", "bkash").upper()
+                        acc = w.get("account_number", w.get("bkash", ""))
+                        record_transaction(w["user_id"], "withdraw", -w["amount"], f"Withdraw via {method_str} to {acc}")
                         save_all()
                         send_telegram_message(f"✅ উইথড্র {w_id} অনুমোদিত।", ADMIN_CHAT_ID)
                         send_telegram_message(f"✅ আপনার {w['amount']} টাকা উইথড্র অ্যাপ্রুভ হয়েছে।", w["user_id"])
@@ -1740,7 +2019,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     break
             else: send_telegram_message("❌ পাওয়া যায়নি।", ADMIN_CHAT_ID)
     elif cmd == "/rejectwithdraw" and chat_id == ADMIN_CHAT_ID:
-        w_id = parts[1] if len(parts) > 1 else None
+        if len(parts) < 2: send_telegram_message("/rejectwithdraw <id>", chat_id); return
+        w_id = parts[1]
         with data_lock:
             for w in withdraw_requests:
                 if w["id"] == w_id and w["status"] == "pending":
@@ -1750,6 +2030,20 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     send_telegram_message(f"❌ আপনার {w['amount']} টাকা উইথড্র বাতিল হয়েছে।", w["user_id"])
                     break
             else: send_telegram_message("❌ পাওয়া যায়নি।", ADMIN_CHAT_ID)
+    elif cmd == "/history":
+        user_txns = [t for t in transactions if t["user_id"] == chat_id]
+        if not user_txns:
+            send_telegram_message("আপনার কোনো ট্রানজেকশন ইতিহাস নেই।", chat_id)
+        else:
+            recent = user_txns[-10:]
+            lines = ["📜 **সাম্প্রতিক ট্রানজেকশন:**\n"]
+            for t in reversed(recent):
+                sign = "+" if t["amount"] >= 0 else ""
+                date_str = datetime.datetime.fromtimestamp(t["timestamp"]).strftime("%d/%m/%Y %H:%M")
+                lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
+            send_telegram_message("\n".join(lines), chat_id)
+    elif cmd == "/rps":
+        start_rps(chat_id)
     elif cmd == "/backup" and chat_id == ADMIN_CHAT_ID:
         with data_lock:
             backup_data = {
@@ -1759,6 +2053,9 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                 "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
                 "deposit_requests": deposit_requests, "user_last_request": user_last_request,
+                "transactions": transactions,
+                "submitted_usernames": list(submitted_usernames),
+                "rps_daily_wins": rps_daily_wins,
                 "timestamp": datetime.datetime.now().isoformat()
             }
         json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -1816,6 +2113,15 @@ def daily_task_loop():
 
         time.sleep(60)
 
+# ================== DUPLICATE CLEANUP (every 2 days) ==================
+def duplicate_cleanup_loop():
+    while True:
+        time.sleep(172800)  # 48 hours
+        with data_lock:
+            submitted_usernames.clear()
+            save_all()
+        logger.info("Duplicate username set cleared")
+
 # ================== FLASK ==================
 @app.route("/")
 def home():
@@ -1837,6 +2143,7 @@ if __name__ == "__main__":
                 save_all()
     threading.Thread(target=daily_clean, daemon=True).start()
     threading.Thread(target=daily_task_loop, daemon=True).start()
+    threading.Thread(target=duplicate_cleanup_loop, daemon=True).start()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

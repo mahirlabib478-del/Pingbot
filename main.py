@@ -246,7 +246,7 @@ def answer_callback_query(callback_id, text=None):
     except Exception as e:
         logger.error(f"Callback answer error: {e}")
 
-# ================== CHANNEL BACKUP ==================
+# ================== CHANNEL BACKUP (PINNED MESSAGE – WORKING) ==================
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID: return
@@ -1387,10 +1387,10 @@ def handle_telegram_commands():
                         data = cb["data"]
                         from_user = cb.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
-                        chat_type = cb["message"]["chat"]["type"]  # FIXED
+                        chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # version refresh for callback
+                        # version refresh
                         current_version = config.get("bot_version", "1.0")
                         user_version = user_versions.get(chat_id, "0")
                         if user_version != current_version:
@@ -1403,7 +1403,7 @@ def handle_telegram_commands():
                                                   chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                             user_versions[chat_id] = current_version
                             save_all()
-                            continue  # ignore callback after refresh
+                            continue
 
                         # existing callback handling
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
@@ -1529,7 +1529,7 @@ def handle_telegram_commands():
                         from_user = msg.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
 
-                        # ---- BOT VERSION CHECK (force refresh) ----
+                        # ---- BOT VERSION CHECK ----
                         current_version = config.get("bot_version", "1.0")
                         user_version = user_versions.get(chat_id, "0")
                         if user_version != current_version:
@@ -1589,7 +1589,7 @@ def handle_telegram_commands():
                                         send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
-                        # support / cancel inside support
+                        # support cancel
                         if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             support_sessions.discard(chat_id)
                             send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
@@ -1604,15 +1604,13 @@ def handle_telegram_commands():
                             send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", ADMIN_CHAT_ID, reply_markup=admin_panel_keyboard())
                             continue
 
-                        # active sessions: approval, deposit, submission, mother, withdraw
+                        # active sessions
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_approve_sessions:
                             process_admin_approve_step(chat_id, text)
                             continue
-
                         if chat_id in deposit_sessions:
                             process_deposit_step(chat_id, text)
                             continue
-
                         if chat_id in submission_sessions:
                             session = submission_sessions[chat_id]
                             if session.get("step") == "target_amount":
@@ -1638,7 +1636,6 @@ def handle_telegram_commands():
                             else:
                                 process_submission_step(chat_id, text, user_info[chat_id])
                                 continue
-
                         if chat_id in admin_add_mother_session:
                             process_add_mother_step(chat_id, text)
                             continue
@@ -1854,7 +1851,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode
     parts = text.split()
     cmd = parts[0].lower()
-    # FIX: extract from_user from msg
     from_user = msg.get("from", {}) if msg else {}
     if cmd == "/start":
         if chat_type == "private":

@@ -42,7 +42,7 @@ DEPOSITS_FILE = "deposits.json"
 TRANSACTIONS_FILE = "transactions.json"
 DUPLICATE_USERNAMES_FILE = "duplicate_usernames.json"
 RPS_WINS_FILE = "rps_daily_wins.json"
-USER_VERSIONS_FILE = "user_versions.json"   # 👈 new file for version tracking
+USER_VERSIONS_FILE = "user_versions.json"
 
 app = Flask(__name__)
 
@@ -71,17 +71,17 @@ config = {
     "nagad_number": "01XXXXXXXXX",
     "channel_id": str(CHANNEL_ID) if CHANNEL_ID else "",
     "maintenance_mode": False,
-    "bot_version": "1.0"                # 👈 version for auto keyboard refresh
+    "bot_version": "1.0"
 }
 referrals = {}
 referral_bonuses = {}
 leaderboard = {}
 withdraw_requests = []
 deposit_requests = []
-transactions = []                      # transaction history
-submitted_usernames = set()            # duplicate check
-rps_daily_wins = {}                    # daily RPS reward counter
-user_versions = {}                     # 👈 stores user_id -> "version_string"
+transactions = []
+submitted_usernames = set()
+rps_daily_wins = {}
+user_versions = {}
 
 # Session trackers
 submission_sessions = {}
@@ -92,7 +92,7 @@ withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
 broadcast_sessions = {}
-rps_sessions = {}                      # track active RPS games
+rps_sessions = {}
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -1387,6 +1387,7 @@ def handle_telegram_commands():
                         data = cb["data"]
                         from_user = cb.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
+                        chat_type = cb["message"]["chat"]["type"]  # FIXED: define chat_type
                         answer_callback_query(cb["id"])
 
                         # version refresh for callback
@@ -1399,7 +1400,7 @@ def handle_telegram_commands():
                                 sess_dict.pop(chat_id, None)
                             support_sessions.discard(chat_id)
                             send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
-                                                  chat_id, reply_markup=get_main_keyboard(chat_id))
+                                                  chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                             user_versions[chat_id] = current_version
                             save_all()
                             continue  # ignore callback after refresh
@@ -1418,12 +1419,12 @@ def handle_telegram_commands():
                                     del sess_dict[chat_id]
                                     cancelled = True
                                     send_telegram_message("❌ প্রক্রিয়া বাতিল করা হয়েছে।", chat_id,
-                                                         reply_markup=get_main_keyboard(chat_id) if chat_id != ADMIN_CHAT_ID else admin_panel_keyboard())
+                                                         reply_markup=get_main_keyboard(chat_id, chat_type) if chat_id != ADMIN_CHAT_ID else admin_panel_keyboard())
                                     break
                             if chat_id in support_sessions:
                                 support_sessions.discard(chat_id)
                                 cancelled = True
-                                send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id))
+                                send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                             if not cancelled:
                                 answer_callback_query(cb["id"], text="কোনো চলমান প্রক্রিয়া নেই।")
                             continue
@@ -1865,6 +1866,14 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     save_all()
                     send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
         send_telegram_message("✨ স্বাগতম! নিচের বাটন ব্যবহার করুন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+    elif cmd == "/stop":
+        if chat_type == "private":
+            with data_lock:
+                subscribed_users.discard(chat_id)
+                save_all()
+            send_telegram_message("❌ আপনি আনসাবস্ক্রাইব করেছেন। আর কোনো ব্রডকাস্ট বা নোটিফিকেশন পাবেন না। তবে বটের অন্যান্য ফিচার ব্যবহার করতে পারবেন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+        else:
+            send_telegram_message("এই কমান্ড শুধুমাত্র প্রাইভেট চ্যাটে কাজ করে।", chat_id)
     elif cmd == "/maintenance" and chat_id == ADMIN_CHAT_ID:
         args = text[len("/maintenance"):].strip().lower()
         if args in ["on","off"]:

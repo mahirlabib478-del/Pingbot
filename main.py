@@ -1387,7 +1387,7 @@ def handle_telegram_commands():
                         data = cb["data"]
                         from_user = cb.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
-                        chat_type = cb["message"]["chat"]["type"]  # FIXED: define chat_type
+                        chat_type = cb["message"]["chat"]["type"]  # FIXED
                         answer_callback_query(cb["id"])
 
                         # version refresh for callback
@@ -1854,6 +1854,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode
     parts = text.split()
     cmd = parts[0].lower()
+    # FIX: extract from_user from msg
+    from_user = msg.get("from", {}) if msg else {}
     if cmd == "/start":
         if chat_type == "private":
             with data_lock:
@@ -1867,13 +1869,19 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
         send_telegram_message("✨ স্বাগতম! নিচের বাটন ব্যবহার করুন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
     elif cmd == "/stop":
-        if chat_type == "private":
-            with data_lock:
-                subscribed_users.discard(chat_id)
+        user_id = str(from_user["id"]) if from_user else chat_id
+        with data_lock:
+            if user_id in subscribed_users:
+                subscribed_users.discard(user_id)
                 save_all()
-            send_telegram_message("❌ আপনি আনসাবস্ক্রাইব করেছেন। আর কোনো ব্রডকাস্ট বা নোটিফিকেশন পাবেন না। তবে বটের অন্যান্য ফিচার ব্যবহার করতে পারবেন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
-        else:
-            send_telegram_message("এই কমান্ড শুধুমাত্র প্রাইভেট চ্যাটে কাজ করে।", chat_id)
+                send_telegram_message(
+                    "❌ আপনি আনসাবস্ক্রাইব করেছেন। আর কোনো ব্রডকাস্ট বা নোটিফিকেশন পাবেন না। তবে বটের অন্যান্য ফিচার ব্যবহার করতে পারবেন।",
+                    user_id
+                )
+                if chat_type != "private":
+                    send_telegram_message("✅ আপনার সাবস্ক্রিপশন বাতিল করা হয়েছে।", chat_id)
+            else:
+                send_telegram_message("⚠️ আপনি আগেই আনসাবস্ক্রাইব ছিলেন।", user_id)
     elif cmd == "/maintenance" and chat_id == ADMIN_CHAT_ID:
         args = text[len("/maintenance"):].strip().lower()
         if args in ["on","off"]:
@@ -2178,6 +2186,14 @@ def home():
 # ================== MAIN ==================
 if __name__ == "__main__":
     load_all()
+    # ========== AUTO VERSION BUMP ON DEPLOY ==========
+    new_build_id = os.environ.get("RENDER_GIT_COMMIT", uuid.uuid4().hex)
+    old_build_id = config.get("build_id", "")
+    if old_build_id != new_build_id:
+        config["bot_version"] = str(int(time.time()))
+        config["build_id"] = new_build_id
+        save_all()
+        logger.info(f"Auto version updated to {config['bot_version']}")
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except: pass

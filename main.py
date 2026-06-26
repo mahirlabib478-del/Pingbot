@@ -32,6 +32,7 @@ COOLDOWN_FILE = "user_cooldowns.json"
 SUBSCRIBERS_FILE = "subscribers.json"
 USER_INFO_FILE = "user_info.json"
 BALANCES_FILE = "balances.json"
+GAME_BALANCES_FILE = "game_balances.json"                 # নতুন
 CONFIG_FILE = "config.json"
 SUBMISSIONS_FILE = "submissions.json"
 MOTHER_STOCK_FILE = "mother_stock.json"
@@ -55,6 +56,7 @@ user_last_request = {}
 maintenance_mode = False
 
 user_balances = {}
+game_balances = {}                    # নতুন: RPS প্রাইজ থেকে জমা, শুধু মাদার কেনার জন্য
 submissions = []
 mother_stock = []
 config = {
@@ -144,7 +146,7 @@ def save_json(filename, data):
 
 def load_all():
     global mother_accounts, user_last_request, subscribed_users, user_info
-    global user_balances, submissions, config, referrals, referral_bonuses, leaderboard
+    global user_balances, game_balances, submissions, config, referrals, referral_bonuses, leaderboard
     global mother_stock, withdraw_requests, deposit_requests, maintenance_mode
     global transactions, submitted_usernames, rps_daily_wins, user_versions
 
@@ -153,6 +155,7 @@ def load_all():
     subscribed_users = set(load_json(SUBSCRIBERS_FILE, {"subscribed": []}).get("subscribed", []))
     user_info = load_json(USER_INFO_FILE, {})
     user_balances = load_json(BALANCES_FILE, {})
+    game_balances = load_json(GAME_BALANCES_FILE, {})          # নতুন
     submissions = load_json(SUBMISSIONS_FILE, [])
     mother_stock = load_json(MOTHER_STOCK_FILE, [])
     referrals = load_json(REFERRALS_FILE, {})
@@ -192,6 +195,7 @@ def save_all():
     save_json(SUBSCRIBERS_FILE, {"subscribed": list(subscribed_users)})
     save_json(USER_INFO_FILE, user_info)
     save_json(BALANCES_FILE, user_balances)
+    save_json(GAME_BALANCES_FILE, game_balances)               # নতুন
     save_json(SUBMISSIONS_FILE, submissions)
     save_json(MOTHER_STOCK_FILE, mother_stock)
     save_json(REFERRALS_FILE, referrals)
@@ -282,7 +286,9 @@ def save_data_to_channel():
             with data_lock:
                 data = {
                     "subscribed_users": list(subscribed_users), "user_info": user_info,
-                    "user_balances": user_balances, "submissions": submissions,
+                    "user_balances": user_balances,
+                    "game_balances": game_balances,                     # নতুন
+                    "submissions": submissions,
                     "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                     "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
@@ -335,12 +341,13 @@ def auto_restore_from_channel():
         decompressed = gzip.decompress(content)
         data = json.loads(decompressed.decode('utf-8'))
         with data_lock:
-            global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
+            global subscribed_users, user_info, user_balances, game_balances, submissions, mother_stock, mother_accounts
             global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
             global transactions, submitted_usernames, rps_daily_wins, user_versions
             subscribed_users = set(data.get("subscribed_users", []))
             user_info = data.get("user_info", {})
             user_balances = data.get("user_balances", {})
+            game_balances = data.get("game_balances", {})     # নতুন
             submissions = data.get("submissions", [])
             mother_stock = data.get("mother_stock", [])
             mother_accounts = data.get("mother_accounts", [])
@@ -547,14 +554,20 @@ def get_profile_text(uid):
     with data_lock:
         init_leaderboard_entry(uid)
         bal = user_balances.get(uid, 0)
+        gb = game_balances.get(uid, 0)                              # নতুন
         stats = leaderboard.get(uid, {})
         target_progress = get_target_progress(uid)
 
     msg = (
         f"👤 {user_info.get(uid, uid)}-এর প্রোফাইল\n\n"
         f"💰 মোট ইনকাম: {stats.get('total_income', 0)} টাকা\n"
-        f"📊 ব্যালেন্স: {bal} টাকা\n"
-        f"📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
+        f"📊 মূল ব্যালেন্স: {bal} টাকা"                              # পরিবর্তিত
+    )
+    if gb > 0:                                                       # নতুন
+        msg += f"\n🎮 গেম ব্যালেন্স (মাদার কেনার জন্য): {gb} টাকা"   # নতুন
+
+    msg += (
+        f"\n📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
         f"📤 সাবমিট:\n"
         f"  🔐 2FA: {stats.get('total_submitted_2fa', 0)} টি (ওকে: {stats.get('total_ok_2fa', 0)})\n"
         f"  🍪 কুকিজ: {stats.get('total_submitted_cookies', 0)} টি (ওকে: {stats.get('total_ok_cookies', 0)})\n"
@@ -839,9 +852,10 @@ def process_mother_buy_step(chat_id, text):
     price = config["mother_price"]
     total = qty * price
     with data_lock:
-        bal = user_balances.get(str(chat_id), 0)
-        if bal < total:
-            send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই।", chat_id)
+        bal_main = user_balances.get(str(chat_id), 0)
+        bal_game = game_balances.get(str(chat_id), 0)             # নতুন
+        if bal_main + bal_game < total:
+            send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই (মূল: {bal_main}, গেম: {bal_game})।", chat_id)
             del submission_sessions[chat_id]
             return True
         available = [m for m in mother_stock if not m.get("sold")]
@@ -849,6 +863,23 @@ def process_mother_buy_step(chat_id, text):
             send_telegram_message(f"❌ পর্যাপ্ত স্টক নেই।", chat_id)
             del submission_sessions[chat_id]
             return True
+
+        # প্রথমে game_balance থেকে কাটুন, বাকি main থেকে
+        remaining = total
+        game_used = 0
+        main_used = 0
+        if bal_game >= remaining:
+            game_balances[str(chat_id)] = bal_game - remaining
+            game_used = remaining
+            remaining = 0
+        else:
+            game_used = bal_game
+            remaining -= bal_game
+            game_balances[str(chat_id)] = 0
+            main_used = remaining
+            user_balances[str(chat_id)] = bal_main - main_used
+
+        # স্টক থেকে কেনা অ্যাকাউন্ট আলাদা করা
         to_buy = []
         new_stock = []
         bought = 0
@@ -859,9 +890,11 @@ def process_mother_buy_step(chat_id, text):
             else:
                 new_stock.append(acc)
         mother_stock[:] = new_stock
-        user_balances[str(chat_id)] = bal - total
-        record_transaction(chat_id, "mother_purchase", -total, f"Bought {qty} mother accounts")
+
+        record_transaction(chat_id, "mother_purchase", -total,
+                           f"Bought {qty} mother accounts (game={game_used}, main={main_used})")
         schedule_save()
+
     # ইউজারকে আশ্বাস
     send_telegram_message("🔄 আপনার মাদার একাউন্ট প্রসেস হচ্ছে...", chat_id)
     threading.Thread(target=deliver_mother_purchase, args=(chat_id, to_buy, qty, total), daemon=True).start()
@@ -879,8 +912,11 @@ def deliver_mother_purchase(chat_id, to_buy, qty, total):
             schedule_save()
         send_telegram_message(f"✅ {qty} টি মাদার একাউন্ট কেনা সফল।", chat_id)
     else:
+        # ডেলিভারি ব্যর্থ হলে টাকা ফেরত
         with data_lock:
             mother_stock.extend(to_buy)
+            # ফেরত: মূলত main + game ব্যালেন্স ফেরত দিচ্ছি যেভাবে কেটেছিল
+            # কিন্তু আমরা ইতিমধ্যে কেটে ফেলেছি। পুরো টাকাটাই আবার যোগ করে দিচ্ছি main ব্যালেন্সে
             user_balances[str(chat_id)] = user_balances.get(str(chat_id), 0) + total
             schedule_save()
         send_telegram_message("⚠️ ডেলিভারি ব্যর্থ। টাকা ফেরত দেওয়া হয়েছে।", chat_id)
@@ -1159,7 +1195,7 @@ def process_withdraw_step(chat_id, text):
         except:
             send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id, reply_markup=cancel_kb)
             return True
-        if amount > user_balances.get(chat_id, 0):
+        if amount > user_balances.get(chat_id, 0):   # শুধু main ব্যালেন্স চেক (game ব্যালেন্স নয়)
             send_telegram_message("❌ অপর্যাপ্ত ব্যালেন্স।", chat_id)
             del withdraw_sessions[chat_id]
             return True
@@ -1294,7 +1330,7 @@ def admin_broadcast_prompt(chat_id):
     }
     send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id, reply_markup=kb)
 
-# ================== RPS GAME ==================
+# ================== RPS GAME (modified reward logic) ==================
 def start_rps(chat_id):
     today = str(datetime.date.today())
     with data_lock:
@@ -1355,9 +1391,10 @@ def process_rps_callback(chat_id, user_choice):
                     if mother.get("fa_key"):
                         reward_text += f"\n🔐 2FA: {mother['fa_key']}"
                 else:
-                    user_balances[chat_id] = user_balances.get(chat_id, 0) + 5
-                    record_transaction(chat_id, "rps_reward", 5, "RPS Game: 5 TK bonus")
-                    reward_text = "💰 ৫ টাকা ব্যালেন্সে যোগ হয়েছে।"
+                    # 5 টাকা জমা game_balances এ (আগে user_balances এ জমা হতো)
+                    game_balances[chat_id] = game_balances.get(chat_id, 0) + 5
+                    record_transaction(chat_id, "rps_reward", 5, "RPS Game: 5 TK (game balance)")
+                    reward_text = "💰 গেম ব্যালেন্সে ৫ টাকা যোগ হয়েছে (শুধু মাদার একাউন্ট কেনার জন্য ব্যবহার করা যাবে)।"
                 msg += f"\n{reward_text}\n(আজকের পুরস্কার {entry['wins']}/3 ব্যবহৃত)"
             else:
                 msg += "\nদুঃখিত, আজ পুরস্কার শেষ। তারপরও ভালো খেলেছেন!"
@@ -1433,7 +1470,7 @@ def handle_inline_query(inline_query):
 
 # ================== MAIN TELEGRAM HANDLER ==================
 def handle_telegram_commands():
-    global subscribed_users, user_info, user_balances, submissions, mother_stock, mother_accounts
+    global subscribed_users, user_info, user_balances, game_balances, submissions, mother_stock, mother_accounts
     global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
     global maintenance_mode, last_update_id, transactions, submitted_usernames, rps_daily_wins, user_versions
 
@@ -1645,11 +1682,6 @@ def handle_telegram_commands():
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
                             continue
 
-                        # /restore (admin only)
-                        if chat_id == ADMIN_CHAT_ID and text.strip().lower() == "/restore":
-                            # existing restore handler unchanged
-                            pass
-
                         # support / cancel inside support
                         if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             support_sessions.discard(chat_id)
@@ -1760,7 +1792,12 @@ def handle_telegram_commands():
                             link = f"https://t.me/{BOT_USERNAME}?start=ref_{chat_id}"
                             send_telegram_message(f"🔗 আপনার রেফারেল লিংক:\n{link}\n\nশেয়ার করে ৫% বোনাস পান!", chat_id)
                         elif text == "💰 ব্যালেন্স":
-                            send_telegram_message(f"💰 ব্যালেন্স: {user_balances.get(chat_id,0)} টাকা", chat_id)
+                            main = user_balances.get(chat_id, 0)
+                            game = game_balances.get(chat_id, 0)
+                            msg = f"💰 মূল ব্যালেন্স: {main} টাকা"
+                            if game > 0:
+                                msg += f"\n🎮 গেম ব্যালেন্স (মাদার কেনার জন্য): {game} টাকা"
+                            send_telegram_message(msg, chat_id)
                         elif text == "💳 ডিপোজিট": start_deposit(chat_id)
                         elif text == "💸 উইথড্র": start_withdraw(chat_id)
                         elif text == "📊 লিডারবোর্ড": show_leaderboard(chat_id)
@@ -1814,7 +1851,9 @@ def handle_telegram_commands():
                             with data_lock:
                                 backup_data = {
                                     "subscribed_users": list(subscribed_users), "user_info": user_info,
-                                    "user_balances": user_balances, "submissions": submissions,
+                                    "user_balances": user_balances,
+                                    "game_balances": game_balances,             # নতুন
+                                    "submissions": submissions,
                                     "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                                     "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
@@ -1882,7 +1921,7 @@ def broadcast_media(media_type, file_id, caption):
         time.sleep(0.05)
 
 def handle_commands(chat_id, text, chat_type="private", msg=None):
-    global maintenance_mode
+    global maintenance_mode, game_balances
     parts = text.split()
     cmd = parts[0].lower()
     if cmd == "/start":
@@ -2126,7 +2165,9 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         with data_lock:
             backup_data = {
                 "subscribed_users": list(subscribed_users), "user_info": user_info,
-                "user_balances": user_balances, "submissions": submissions,
+                "user_balances": user_balances,
+                "game_balances": game_balances,                     # নতুন
+                "submissions": submissions,
                 "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                 "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
                 "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,

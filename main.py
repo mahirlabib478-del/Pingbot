@@ -99,6 +99,7 @@ rps_sessions = {}
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 last_backup_message_id = None
+last_backup_part_ids = []           # NEW: to keep track of multi-part backup message IDs
 
 last_morning_sent_date = None
 last_evening_sent_date = None
@@ -277,14 +278,46 @@ def answer_callback_query(callback_id, text=None):
     except Exception as e:
         logger.error(f"Callback answer error: {e}")
 
-# ================== CHANNEL BACKUP ==================
+# ================== CHANNEL BACKUP (with cleanup) ==================
 MAX_PART_SIZE = 45 * 1024 * 1024  # 45 MB
 
+def cleanup_old_channel_backup():
+    """Deletes the previous backup (single file or multi-part) from the channel."""
+    global last_backup_message_id, last_backup_part_ids
+    if not CHANNEL_ID:
+        return
+    try:
+        # Unpin old message first
+        if last_backup_message_id:
+            bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
+                             json={"chat_id": CHANNEL_ID, "message_id": last_backup_message_id})
+        # Delete all parts (if any)
+        for part_id in last_backup_part_ids:
+            try:
+                delete_message(CHANNEL_ID, part_id)
+            except:
+                pass
+        # Delete the index/single backup message
+        if last_backup_message_id:
+            try:
+                delete_message(CHANNEL_ID, last_backup_message_id)
+            except:
+                pass
+        # Reset tracking
+        last_backup_message_id = None
+        last_backup_part_ids = []
+    except Exception as e:
+        logger.error(f"Backup cleanup error: {e}")
+
 def save_data_to_channel():
-    global last_backup_message_id
+    global last_backup_message_id, last_backup_part_ids
     if not CHANNEL_ID: return
     with backup_lock:
         try:
+            # 1. Remove previous backup from channel
+            cleanup_old_channel_backup()
+
+            # 2. Prepare data
             with data_lock:
                 data = {
                     "subscribed_users": list(subscribed_users), "user_info": user_info,
@@ -304,20 +337,24 @@ def save_data_to_channel():
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
             compressed = gzip.compress(json_bytes, compresslevel=6)
 
+            # 3. Send either single file or multi-part
             if len(compressed) <= MAX_PART_SIZE:
-                # একক ফাইল পাঠাই
+                # Single file backup
                 filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
                 files = {'document': (filename, compressed, 'application/gzip')}
                 resp = bot_session.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
                 if resp.status_code == 200 and resp.json().get("ok"):
                     last_backup_message_id = resp.json()["result"]["message_id"]
+                    last_backup_part_ids = []   # single file, no parts
                     bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
-                        "chat_id": CHANNEL_ID, "message_id": last_backup_message_id,
+                        "chat_id": CHANNEL_ID,
+                        "message_id": last_backup_message_id,
                         "disable_notification": True
                     })
                 return
-            # ---- মাল্টি-পার্ট ব্যাকআপ ----
+
+            # ---- Multi-part backup ----
             chunks = [compressed[i:i+MAX_PART_SIZE] for i in range(0, len(compressed), MAX_PART_SIZE)]
             part_ids = []
             total = len(chunks)
@@ -336,7 +373,7 @@ def save_data_to_channel():
                     logger.error(f"Failed to send backup part {idx}/{total}")
                     return
 
-            # ইনডেক্স মেসেজ
+            # Index message
             index_data = {
                 "backup_id": timestamp,
                 "parts": part_ids,
@@ -353,6 +390,7 @@ def save_data_to_channel():
                     "disable_notification": True
                 })
                 last_backup_message_id = index_msg_id
+                last_backup_part_ids = part_ids  # remember parts for later cleanup
 
         except Exception as e:
             logger.error(f"Channel backup error: {e}")
@@ -363,7 +401,7 @@ def auto_backup_loop():
         save_data_to_channel()
 
 def auto_restore_from_channel():
-    global last_backup_message_id
+    global last_backup_message_id, last_backup_part_ids
     if not CHANNEL_ID: return
     try:
         resp = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}", timeout=20).json()
@@ -371,7 +409,7 @@ def auto_restore_from_channel():
         pinned = resp["result"].get("pinned_message")
         if not pinned: return
 
-        # ----- কেস ১: একক ফাইল (ডকুমেন্ট) -----
+        # ----- Case 1: Single file (document) -----
         if "document" in pinned:
             file_id = pinned["document"]["file_id"]
             file_info = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
@@ -379,7 +417,9 @@ def auto_restore_from_channel():
             file_path = file_info["result"]["file_path"]
             content = bot_session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
             compressed = content
-        # ----- কেস ২: ইনডেক্স (টেক্সট) -----
+            last_backup_part_ids = []  # single file
+
+        # ----- Case 2: Index message (text) -----
         elif "text" in pinned:
             index = json.loads(pinned["text"])
             part_ids = index.get("parts", [])
@@ -406,10 +446,12 @@ def auto_restore_from_channel():
                 ).content
                 combined.extend(part_content)
             compressed = bytes(combined)
+            last_backup_part_ids = part_ids  # remember for cleanup
+
         else:
             return
 
-        # ডিকম্প্রেস ও লোড
+        # Decompress and load
         decompressed = gzip.decompress(compressed)
         data = json.loads(decompressed.decode('utf-8'))
 
@@ -742,9 +784,7 @@ def process_submission_step(chat_id, text, sender_username):
                 submitted_usernames.add(u)
             schedule_save()
 
-        # ইউজারকে কনফার্মেশন দিন
         send_telegram_message("✅ আপনার ফাইল প্রক্রিয়াধীন। একটু অপেক্ষা করুন...", chat_id)
-        # ভারী কাজ থ্রেডে পাঠান
         threading.Thread(target=process_submission_heavy, args=(
             session["usernames"], session["passwords"], twofa_list,
             sender_username, chat_id, session["type"]
@@ -829,7 +869,7 @@ def process_admin_approve_step(chat_id, text):
                 add_ok(user_id, acc_type, ok_count, amount)
                 distribute_referral_bonus(user_id, amount)
                 record_transaction(user_id, "submission_earning", amount, f"{acc_type.upper()} OK ({ok_count} pcs)")
-                save_all()  # immediate save for approval
+                save_all()
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
                 send_telegram_message(f"🎉 আপনার {ok_count} টি আইডি ওকে হয়েছে! {amount} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", user_id)
                 break
@@ -869,7 +909,7 @@ def reject_submission(sub_id):
                 for username in sub.get("usernames", []):
                     submitted_usernames.discard(username)
                 sub["status"] = "rejected"
-                save_all()  # immediate for rejection
+                save_all()
                 return True
     return False
 
@@ -937,7 +977,7 @@ def process_mother_buy_step(chat_id, text):
             del submission_sessions[chat_id]
             return True
 
-        # স্টক থেকে কেনা অ্যাকাউন্ট আলাদা করা
+        # Separate the accounts to buy
         to_buy = []
         new_stock = []
         bought = 0
@@ -949,13 +989,13 @@ def process_mother_buy_step(chat_id, text):
                 new_stock.append(acc)
         mother_stock[:] = new_stock
 
-        # গেম ব্যালেন্স আগে কাটুন, বাকি মেইন থেকে
+        # Deduct from game balance first, then main balance
         remaining = total
         game_used = 0
         main_used = 0
         if bal_game >= remaining:
             game_balances[str(chat_id)] = bal_game - remaining
-            game_used = bal_game
+            game_used = remaining
             remaining = 0
         else:
             game_used = bal_game
@@ -964,23 +1004,10 @@ def process_mother_buy_step(chat_id, text):
             main_used = remaining
             user_balances[str(chat_id)] = bal_main - main_used
 
-        # স্টক থেকে কেনা অ্যাকাউন্ট আলাদা করা
-        to_buy = []
-        new_stock = []
-        bought = 0
-        for acc in mother_stock:
-            if not acc.get("sold") and bought < qty:
-                to_buy.append(acc)
-                bought += 1
-            else:
-                new_stock.append(acc)
-        mother_stock[:] = new_stock
-
         record_transaction(chat_id, "mother_purchase", -total,
                            f"Bought {qty} mother accounts (game={game_used}, main={main_used})")
         schedule_save()
 
-    # ইউজারকে আশ্বাস
     send_telegram_message("🔄 আপনার মাদার একাউন্ট প্রসেস হচ্ছে...", chat_id)
     threading.Thread(target=deliver_mother_purchase, args=(chat_id, to_buy, qty, total), daemon=True).start()
     del submission_sessions[chat_id]
@@ -1202,8 +1229,7 @@ def show_free_mother_list(chat_id, page=0, message_id=None):
 
     if message_id:
         bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
-            "chat_id": chat_id,
-            "message_id": message_id,
+            "chat_id": chat_id, "message_id": message_id,
             "text": "\n".join(lines),
             "reply_markup": {"inline_keyboard": keyboard_rows}
         })
@@ -1299,7 +1325,7 @@ def process_withdraw_step(chat_id, text):
             "method": session["method"], "account_number": account,
             "status": "pending", "time": time.time()
         })
-        save_all()  # immediate save for withdraw request
+        save_all()
         del withdraw_sessions[chat_id]
         send_telegram_message(f"✅ {session['amount']} টাকা উইথড্র রিকোয়েস্ট জমা হয়েছে।", chat_id)
         send_telegram_message(
@@ -1363,7 +1389,7 @@ def process_deposit_step(chat_id, text):
         }
         with data_lock:
             deposit_requests.append(dep_req)
-            save_all()  # immediate save for deposit request
+            save_all()
         del deposit_sessions[chat_id]
         send_telegram_message(
             f"✅ আপনার {amount} টাকার ডিপোজিট রিকোয়েস্ট ({session['method'].upper()}) জমা হয়েছে।\nট্রানজেকশন আইডি: {trxid}\nঅ্যাডমিন অনুমোদন করলেই ব্যালেন্স যোগ হবে।",
@@ -1475,7 +1501,6 @@ def process_rps_callback(chat_id, user_choice):
                     if mother.get("fa_key"):
                         reward_text += f"\n🔐 2FA: {mother['fa_key']}"
                 else:
-                    # 5 টাকা জমা game_balances এ (আগে user_balances এ জমা হতো)
                     game_balances[chat_id] = game_balances.get(chat_id, 0) + 5
                     record_transaction(chat_id, "rps_reward", 5, "RPS Game: 5 TK (game balance)")
                     reward_text = "💰 গেম ব্যালেন্সে ৫ টাকা যোগ হয়েছে (শুধু মাদার একাউন্ট কেনার জন্য ব্যবহার করা যাবে)।"

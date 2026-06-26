@@ -718,8 +718,8 @@ def record_transaction(user_id, type_, amount, description):
     }
     with data_lock:
         transactions.append(txn)
-        if len(transactions) > 1000:
-            transactions[:] = transactions[-1000:]
+        if len(transactions) > 100000:
+            transactions[:] = transactions[-100000:]
         schedule_save()
 
 # ================== SUBMISSION SYSTEM ==================

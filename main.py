@@ -246,7 +246,7 @@ def answer_callback_query(callback_id, text=None):
     except Exception as e:
         logger.error(f"Callback answer error: {e}")
 
-# ================== CHANNEL BACKUP (PINNED MESSAGE – WORKING) ==================
+# ================== CHANNEL BACKUP ==================
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID: return
@@ -330,6 +330,7 @@ def auto_restore_from_channel():
             user_versions = data.get("user_versions", {})
             last_backup_message_id = pinned["message_id"]
         save_all()
+        logger.info("Data restored from channel backup successfully")
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
 
@@ -1390,20 +1391,21 @@ def handle_telegram_commands():
                         chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # version refresh
-                        current_version = config.get("bot_version", "1.0")
-                        user_version = user_versions.get(chat_id, "0")
-                        if user_version != current_version:
-                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
-                                              admin_add_mother_session, admin_add_mother_bulk_session,
-                                              admin_approve_sessions, broadcast_sessions, rps_sessions]:
-                                sess_dict.pop(chat_id, None)
-                            support_sessions.discard(chat_id)
-                            send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
-                                                  chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
-                            user_versions[chat_id] = current_version
-                            save_all()
-                            continue
+                        # version refresh (only private chat)
+                        if chat_type == "private":
+                            current_version = config.get("bot_version", "1.0")
+                            user_version = user_versions.get(chat_id, "0")
+                            if user_version != current_version:
+                                for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
+                                                  admin_add_mother_session, admin_add_mother_bulk_session,
+                                                  admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                    sess_dict.pop(chat_id, None)
+                                support_sessions.discard(chat_id)
+                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
+                                                      chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+                                user_versions[chat_id] = current_version
+                                save_all()
+                                continue
 
                         # existing callback handling
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
@@ -1529,20 +1531,21 @@ def handle_telegram_commands():
                         from_user = msg.get("from", {})
                         user_info[chat_id] = from_user.get("username") or from_user.get("first_name", f"ID:{chat_id}")
 
-                        # ---- BOT VERSION CHECK ----
-                        current_version = config.get("bot_version", "1.0")
-                        user_version = user_versions.get(chat_id, "0")
-                        if user_version != current_version:
-                            for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
-                                              admin_add_mother_session, admin_add_mother_bulk_session,
-                                              admin_approve_sessions, broadcast_sessions, rps_sessions]:
-                                sess_dict.pop(chat_id, None)
-                            support_sessions.discard(chat_id)
-                            send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু ব্যবহার করুন অথবা /start দিন।",
-                                                  chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
-                            user_versions[chat_id] = current_version
-                            save_all()
-                            continue
+                        # ---- BOT VERSION CHECK (only private) ----
+                        if chat_type == "private":
+                            current_version = config.get("bot_version", "1.0")
+                            user_version = user_versions.get(chat_id, "0")
+                            if user_version != current_version:
+                                for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
+                                                  admin_add_mother_session, admin_add_mother_bulk_session,
+                                                  admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                    sess_dict.pop(chat_id, None)
+                                support_sessions.discard(chat_id)
+                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু ব্যবহার করুন অথবা /start দিন।",
+                                                      chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+                                user_versions[chat_id] = current_version
+                                save_all()
+                                continue
 
                         if maintenance_mode and chat_id != ADMIN_CHAT_ID:
                             send_telegram_message("🔧 রক্ষণাবেক্ষণ মোড চালু আছে।", chat_id)
@@ -1589,7 +1592,7 @@ def handle_telegram_commands():
                                         send_telegram_message(f"❌ রিস্টোর ফেইল: {e}", ADMIN_CHAT_ID)
                             continue
 
-                        # support cancel
+                        # support / cancel inside support
                         if chat_id in support_sessions and text.strip().lower() in ["/cancel", "/start"]:
                             support_sessions.discard(chat_id)
                             send_telegram_message("❌ সাপোর্ট বন্ধ করা হয়েছে।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
@@ -1604,13 +1607,15 @@ def handle_telegram_commands():
                             send_telegram_message("❌ ব্রডকাস্ট বাতিল করা হয়েছে।", ADMIN_CHAT_ID, reply_markup=admin_panel_keyboard())
                             continue
 
-                        # active sessions
+                        # active sessions: approval, deposit, submission, mother, withdraw
                         if chat_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID in admin_approve_sessions:
                             process_admin_approve_step(chat_id, text)
                             continue
+
                         if chat_id in deposit_sessions:
                             process_deposit_step(chat_id, text)
                             continue
+
                         if chat_id in submission_sessions:
                             session = submission_sessions[chat_id]
                             if session.get("step") == "target_amount":
@@ -1636,6 +1641,7 @@ def handle_telegram_commands():
                             else:
                                 process_submission_step(chat_id, text, user_info[chat_id])
                                 continue
+
                         if chat_id in admin_add_mother_session:
                             process_add_mother_step(chat_id, text)
                             continue
@@ -2182,7 +2188,9 @@ def home():
 # ================== MAIN ==================
 if __name__ == "__main__":
     load_all()
-    # ========== AUTO VERSION BUMP ON DEPLOY ==========
+    # IMPORTANT: Restore from channel BEFORE version bump
+    auto_restore_from_channel()
+    # Auto version bump on deploy
     new_build_id = os.environ.get("RENDER_GIT_COMMIT", uuid.uuid4().hex)
     old_build_id = config.get("build_id", "")
     if old_build_id != new_build_id:
@@ -2193,7 +2201,6 @@ if __name__ == "__main__":
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except: pass
-    auto_restore_from_channel()
     threading.Thread(target=auto_backup_loop, daemon=True).start()
     def daily_clean():
         while True:

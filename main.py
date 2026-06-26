@@ -32,7 +32,7 @@ COOLDOWN_FILE = "user_cooldowns.json"
 SUBSCRIBERS_FILE = "subscribers.json"
 USER_INFO_FILE = "user_info.json"
 BALANCES_FILE = "balances.json"
-GAME_BALANCES_FILE = "game_balances.json"                 # নতুন
+GAME_BALANCES_FILE = "game_balances.json"
 CONFIG_FILE = "config.json"
 SUBMISSIONS_FILE = "submissions.json"
 MOTHER_STOCK_FILE = "mother_stock.json"
@@ -56,7 +56,7 @@ user_last_request = {}
 maintenance_mode = False
 
 user_balances = {}
-game_balances = {}                    # নতুন: RPS প্রাইজ থেকে জমা, শুধু মাদার কেনার জন্য
+game_balances = {}
 submissions = []
 mother_stock = []
 config = {
@@ -155,7 +155,7 @@ def load_all():
     subscribed_users = set(load_json(SUBSCRIBERS_FILE, {"subscribed": []}).get("subscribed", []))
     user_info = load_json(USER_INFO_FILE, {})
     user_balances = load_json(BALANCES_FILE, {})
-    game_balances = load_json(GAME_BALANCES_FILE, {})          # নতুন
+    game_balances = load_json(GAME_BALANCES_FILE, {})
     submissions = load_json(SUBMISSIONS_FILE, [])
     mother_stock = load_json(MOTHER_STOCK_FILE, [])
     referrals = load_json(REFERRALS_FILE, {})
@@ -195,7 +195,7 @@ def save_all():
     save_json(SUBSCRIBERS_FILE, {"subscribed": list(subscribed_users)})
     save_json(USER_INFO_FILE, user_info)
     save_json(BALANCES_FILE, user_balances)
-    save_json(GAME_BALANCES_FILE, game_balances)               # নতুন
+    save_json(GAME_BALANCES_FILE, game_balances)
     save_json(SUBMISSIONS_FILE, submissions)
     save_json(MOTHER_STOCK_FILE, mother_stock)
     save_json(REFERRALS_FILE, referrals)
@@ -278,6 +278,8 @@ def answer_callback_query(callback_id, text=None):
         logger.error(f"Callback answer error: {e}")
 
 # ================== CHANNEL BACKUP ==================
+MAX_PART_SIZE = 45 * 1024 * 1024  # 45 MB
+
 def save_data_to_channel():
     global last_backup_message_id
     if not CHANNEL_ID: return
@@ -287,7 +289,7 @@ def save_data_to_channel():
                 data = {
                     "subscribed_users": list(subscribed_users), "user_info": user_info,
                     "user_balances": user_balances,
-                    "game_balances": game_balances,                     # নতুন
+                    "game_balances": game_balances,
                     "submissions": submissions,
                     "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
@@ -301,22 +303,57 @@ def save_data_to_channel():
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
             compressed = gzip.compress(json_bytes, compresslevel=6)
-            if len(compressed) > 48 * 1024 * 1024:
-                logger.warning("Compressed backup too large")
+
+            if len(compressed) <= MAX_PART_SIZE:
+                # একক ফাইল পাঠাই
+                filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                files = {'document': (filename, compressed, 'application/gzip')}
+                resp = bot_session.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    last_backup_message_id = resp.json()["result"]["message_id"]
+                    bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
+                        "chat_id": CHANNEL_ID, "message_id": last_backup_message_id,
+                        "disable_notification": True
+                    })
                 return
-            if last_backup_message_id:
-                try: delete_message(CHANNEL_ID, last_backup_message_id)
-                except: pass
-            filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            files = {'document': (filename, compressed, 'application/gzip')}
-            resp = bot_session.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
-            if resp.status_code == 200 and resp.json().get("ok"):
-                last_backup_message_id = resp.json()["result"]["message_id"]
+            # ---- মাল্টি-পার্ট ব্যাকআপ ----
+            chunks = [compressed[i:i+MAX_PART_SIZE] for i in range(0, len(compressed), MAX_PART_SIZE)]
+            part_ids = []
+            total = len(chunks)
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            for idx, chunk in enumerate(chunks, 1):
+                part_filename = f"backup_{timestamp}_part{idx}of{total}.json.gz"
+                resp = bot_session.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                    data={"chat_id": CHANNEL_ID, "caption": f"Part {idx}/{total}"},
+                    files={"document": (part_filename, chunk, "application/gzip")},
+                    timeout=60
+                )
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    part_ids.append(resp.json()["result"]["message_id"])
+                else:
+                    logger.error(f"Failed to send backup part {idx}/{total}")
+                    return
+
+            # ইনডেক্স মেসেজ
+            index_data = {
+                "backup_id": timestamp,
+                "parts": part_ids,
+                "total_parts": total,
+                "timestamp": timestamp
+            }
+            index_text = json.dumps(index_data)
+            index_resp = send_telegram_message(index_text, CHANNEL_ID)
+            if index_resp and index_resp.status_code == 200 and index_resp.json().get("ok"):
+                index_msg_id = index_resp.json()["result"]["message_id"]
                 bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
-                    "chat_id": CHANNEL_ID, "message_id": last_backup_message_id,
+                    "chat_id": CHANNEL_ID,
+                    "message_id": index_msg_id,
                     "disable_notification": True
                 })
+                last_backup_message_id = index_msg_id
+
         except Exception as e:
             logger.error(f"Channel backup error: {e}")
 
@@ -332,14 +369,50 @@ def auto_restore_from_channel():
         resp = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}", timeout=20).json()
         if not resp.get("ok"): return
         pinned = resp["result"].get("pinned_message")
-        if not pinned or "document" not in pinned: return
-        file_id = pinned["document"]["file_id"]
-        file_info = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
-        if not file_info.get("ok"): return
-        file_path = file_info["result"]["file_path"]
-        content = bot_session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
-        decompressed = gzip.decompress(content)
+        if not pinned: return
+
+        # ----- কেস ১: একক ফাইল (ডকুমেন্ট) -----
+        if "document" in pinned:
+            file_id = pinned["document"]["file_id"]
+            file_info = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
+            if not file_info.get("ok"): return
+            file_path = file_info["result"]["file_path"]
+            content = bot_session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
+            compressed = content
+        # ----- কেস ২: ইনডেক্স (টেক্সট) -----
+        elif "text" in pinned:
+            index = json.loads(pinned["text"])
+            part_ids = index.get("parts", [])
+            if not part_ids: return
+            combined = bytearray()
+            for part_msg_id in part_ids:
+                msg_resp = bot_session.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMessage?chat_id={CHANNEL_ID}&message_id={part_msg_id}",
+                    timeout=20
+                ).json()
+                if not msg_resp.get("ok") or "document" not in msg_resp.get("result", {}):
+                    logger.error(f"Missing part message {part_msg_id}")
+                    return
+                file_id = msg_resp["result"]["document"]["file_id"]
+                file_info = bot_session.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}",
+                    timeout=20
+                ).json()
+                if not file_info.get("ok"): return
+                file_path = file_info["result"]["file_path"]
+                part_content = bot_session.get(
+                    f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
+                    timeout=60
+                ).content
+                combined.extend(part_content)
+            compressed = bytes(combined)
+        else:
+            return
+
+        # ডিকম্প্রেস ও লোড
+        decompressed = gzip.decompress(compressed)
         data = json.loads(decompressed.decode('utf-8'))
+
         with data_lock:
             global subscribed_users, user_info, user_balances, game_balances, submissions, mother_stock, mother_accounts
             global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
@@ -347,7 +420,7 @@ def auto_restore_from_channel():
             subscribed_users = set(data.get("subscribed_users", []))
             user_info = data.get("user_info", {})
             user_balances = data.get("user_balances", {})
-            game_balances = data.get("game_balances", {})     # নতুন
+            game_balances = data.get("game_balances", {})
             submissions = data.get("submissions", [])
             mother_stock = data.get("mother_stock", [])
             mother_accounts = data.get("mother_accounts", [])
@@ -363,7 +436,7 @@ def auto_restore_from_channel():
             rps_daily_wins = data.get("rps_daily_wins", {})
             user_versions = data.get("user_versions", {})
             last_backup_message_id = pinned["message_id"]
-        save_all()  # full immediate save after restore
+        save_all()
         logger.info("Data restored from channel backup successfully")
     except Exception as e:
         logger.error(f"Auto-restore error: {e}")
@@ -554,17 +627,17 @@ def get_profile_text(uid):
     with data_lock:
         init_leaderboard_entry(uid)
         bal = user_balances.get(uid, 0)
-        gb = game_balances.get(uid, 0)                              # নতুন
+        gb = game_balances.get(uid, 0)
         stats = leaderboard.get(uid, {})
         target_progress = get_target_progress(uid)
 
     msg = (
         f"👤 {user_info.get(uid, uid)}-এর প্রোফাইল\n\n"
         f"💰 মোট ইনকাম: {stats.get('total_income', 0)} টাকা\n"
-        f"📊 মূল ব্যালেন্স: {bal} টাকা"                              # পরিবর্তিত
+        f"📊 মূল ব্যালেন্স: {bal} টাকা"
     )
-    if gb > 0:                                                       # নতুন
-        msg += f"\n🎮 গেম ব্যালেন্স (মাদার কেনার জন্য): {gb} টাকা"   # নতুন
+    if gb > 0:
+        msg += f"\n🎮 গেম ব্যালেন্স (মাদার কেনার জন্য): {gb} টাকা"
 
     msg += (
         f"\n📅 গত মাসের আয়: {stats.get('last_month_income', 0)} টাকা\n\n"
@@ -853,7 +926,7 @@ def process_mother_buy_step(chat_id, text):
     total = qty * price
     with data_lock:
         bal_main = user_balances.get(str(chat_id), 0)
-        bal_game = game_balances.get(str(chat_id), 0)             # নতুন
+        bal_game = game_balances.get(str(chat_id), 0)
         if bal_main + bal_game < total:
             send_telegram_message(f"❌ পর্যাপ্ত ব্যালেন্স নেই (মূল: {bal_main}, গেম: {bal_game})।", chat_id)
             del submission_sessions[chat_id]
@@ -864,13 +937,25 @@ def process_mother_buy_step(chat_id, text):
             del submission_sessions[chat_id]
             return True
 
-        # প্রথমে game_balance থেকে কাটুন, বাকি main থেকে
+        # স্টক থেকে কেনা অ্যাকাউন্ট আলাদা করা
+        to_buy = []
+        new_stock = []
+        bought = 0
+        for acc in mother_stock:
+            if not acc.get("sold") and bought < qty:
+                to_buy.append(acc)
+                bought += 1
+            else:
+                new_stock.append(acc)
+        mother_stock[:] = new_stock
+
+        # গেম ব্যালেন্স আগে কাটুন, বাকি মেইন থেকে
         remaining = total
         game_used = 0
         main_used = 0
         if bal_game >= remaining:
             game_balances[str(chat_id)] = bal_game - remaining
-            game_used = remaining
+            game_used = bal_game
             remaining = 0
         else:
             game_used = bal_game
@@ -912,11 +997,8 @@ def deliver_mother_purchase(chat_id, to_buy, qty, total):
             schedule_save()
         send_telegram_message(f"✅ {qty} টি মাদার একাউন্ট কেনা সফল।", chat_id)
     else:
-        # ডেলিভারি ব্যর্থ হলে টাকা ফেরত
         with data_lock:
             mother_stock.extend(to_buy)
-            # ফেরত: মূলত main + game ব্যালেন্স ফেরত দিচ্ছি যেভাবে কেটেছিল
-            # কিন্তু আমরা ইতিমধ্যে কেটে ফেলেছি। পুরো টাকাটাই আবার যোগ করে দিচ্ছি main ব্যালেন্সে
             user_balances[str(chat_id)] = user_balances.get(str(chat_id), 0) + total
             schedule_save()
         send_telegram_message("⚠️ ডেলিভারি ব্যর্থ। টাকা ফেরত দেওয়া হয়েছে।", chat_id)
@@ -1115,11 +1197,13 @@ def show_free_mother_list(chat_id, page=0, message_id=None):
             nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"freemother_page_{page+1}"})
         if nav_buttons:
             keyboard_rows.append(nav_buttons)
+
         keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_freemotherlist"}])
 
     if message_id:
         bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
-            "chat_id": chat_id, "message_id": message_id,
+            "chat_id": chat_id,
+            "message_id": message_id,
             "text": "\n".join(lines),
             "reply_markup": {"inline_keyboard": keyboard_rows}
         })
@@ -1195,7 +1279,7 @@ def process_withdraw_step(chat_id, text):
         except:
             send_telegram_message("⚠️ সঠিক সংখ্যা দিন।", chat_id, reply_markup=cancel_kb)
             return True
-        if amount > user_balances.get(chat_id, 0):   # শুধু main ব্যালেন্স চেক (game ব্যালেন্স নয়)
+        if amount > user_balances.get(chat_id, 0):
             send_telegram_message("❌ অপর্যাপ্ত ব্যালেন্স।", chat_id)
             del withdraw_sessions[chat_id]
             return True
@@ -1330,7 +1414,7 @@ def admin_broadcast_prompt(chat_id):
     }
     send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id, reply_markup=kb)
 
-# ================== RPS GAME (modified reward logic) ==================
+# ================== RPS GAME ==================
 def start_rps(chat_id):
     today = str(datetime.date.today())
     with data_lock:
@@ -1852,7 +1936,7 @@ def handle_telegram_commands():
                                 backup_data = {
                                     "subscribed_users": list(subscribed_users), "user_info": user_info,
                                     "user_balances": user_balances,
-                                    "game_balances": game_balances,             # নতুন
+                                    "game_balances": game_balances,
                                     "submissions": submissions,
                                     "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                                     "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
@@ -2166,7 +2250,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             backup_data = {
                 "subscribed_users": list(subscribed_users), "user_info": user_info,
                 "user_balances": user_balances,
-                "game_balances": game_balances,                     # নতুন
+                "game_balances": game_balances,
                 "submissions": submissions,
                 "mother_stock": mother_stock, "mother_accounts": mother_accounts,
                 "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,

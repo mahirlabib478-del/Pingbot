@@ -232,7 +232,8 @@ def save_all():
         "last_backup_part_ids": last_backup_part_ids,
         "last_backup_part_file_ids": last_backup_part_file_ids
     })
-    # Removed save_data_to_channel() from here to avoid excessive backups
+    # প্রতি সেভেই চ্যানেল ব্যাকআপ (আপনার অনুরোধ অনুযায়ী)
+    save_data_to_channel()
 
 # ================== TELEGRAM HELPERS ==================
 def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
@@ -453,9 +454,12 @@ def save_data_to_channel():
             logger.error(f"Channel backup error: {e}")
 
 def auto_backup_loop():
+    """Runs backup daily at 03:00 local time (disabled if per-save backup is used)."""
+    # যেহেতু প্রতি সেভেই ব্যাকআপ চাইছেন, এই লুপ নিষ্ক্রিয় রাখা হয়েছে।
+    # দরকার হলে কমেন্ট সরিয়ে দিন, তবে save_all()-এ save_data_to_channel() কল থাকলে ডাবল ব্যাকআপ হবে।
     while True:
         time.sleep(86400)
-        save_data_to_channel()
+        # save_data_to_channel()
 
 def restore_data_from_payload(compressed_bytes):
     decompressed = gzip.decompress(compressed_bytes)
@@ -690,7 +694,6 @@ def add_ok(user_id, acc_type, count, amount):
                 bonus = last_income * config["target_bonus"] / 100.0
                 user_balances[uid] = user_balances.get(uid, 0) + bonus
                 entry["total_income"] += bonus
-                # Schedule a message to be sent after releasing lock
                 threading.Thread(target=send_telegram_message, args=(f"🎉 গত মাসের টার্গেট পূরণ! বোনাস {bonus} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", uid)).start()
                 entry["monthly_bonus_paid"] = True
             entry["current_month_income"] = 0.0
@@ -962,7 +965,7 @@ def process_admin_approve_step(chat_id, text):
                 amount = ok_count * price
                 user_balances[user_id] = user_balances.get(user_id, 0) + amount
                 add_ok(user_id, acc_type, ok_count, amount)
-                # Distribute referral bonus (with messages sent after lock release)
+                # Distribute referral bonus (messages will be sent outside lock)
                 distribute_referral_bonus(user_id, amount)
                 record_transaction(user_id, "submission_earning", amount, f"{acc_type.upper()} OK ({ok_count} pcs)")
                 save_all()
@@ -1448,7 +1451,6 @@ def process_withdraw_step(chat_id, text):
             return True
         w_id = uuid.uuid4().hex[:10]
         amount = session["amount"]
-        # Deduct balance immediately
         uid = str(chat_id)
         with data_lock:
             user_balances[uid] = user_balances.get(uid, 0) - amount
@@ -1779,7 +1781,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 if w["id"] == w_id and w["status"] == "pending":
                     user_id = str(w["user_id"])
                     amount = w["amount"]
-                    # Balance already deducted; just mark approved
                     w["status"] = "approved"
                     save_all()
                     send_telegram_message(f"✅ উইথড্র {w_id} অনুমোদিত হয়েছে।", ADMIN_CHAT_ID)
@@ -1795,7 +1796,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     user_id = str(w["user_id"])
                     amount = w["amount"]
                     w["status"] = "rejected"
-                    # Refund the deducted amount
                     user_balances[user_id] = user_balances.get(user_id, 0) + amount
                     record_transaction(user_id, "withdraw_refund", amount, f"Rejected withdraw {w_id}")
                     save_all()
@@ -1998,7 +1998,7 @@ def handle_telegram_commands():
                         chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # Removed version check here to avoid interrupting active sessions
+                        # Version check removed from callbacks to avoid interrupting sessions
 
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
                             broadcast_sessions.pop(ADMIN_CHAT_ID, None)
@@ -2123,7 +2123,7 @@ def handle_telegram_commands():
                         if chat_type == "private":
                             current_version = config.get("bot_version", "1.0")
                             if user_versions.get(chat_id, "0") != current_version:
-                                # Force restart only via message, not callbacks
+                                # Force restart only via text message, not callbacks
                                 for d in [submission_sessions, withdraw_sessions, deposit_sessions,
                                           admin_add_mother_session, admin_add_mother_bulk_session,
                                           admin_approve_sessions, broadcast_sessions, rps_sessions]:
@@ -2346,7 +2346,8 @@ if __name__ == "__main__":
         session = get_bot_session()
         session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except: pass
-    threading.Thread(target=auto_backup_loop, daemon=True).start()
+    # Daily auto-backup disabled because per-save backup is active
+    # threading.Thread(target=auto_backup_loop, daemon=True).start()
     threading.Thread(target=daily_task_loop, daemon=True).start()
     threading.Thread(target=duplicate_cleanup_loop, daemon=True).start()
     threading.Thread(target=user_versions_cleanup_loop, daemon=True).start()

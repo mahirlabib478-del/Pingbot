@@ -384,13 +384,129 @@ def save_data_to_channel():
             index_resp = send_telegram_message(index_text, CHANNEL_ID)
             if index_resp and index_resp.status_code == 200 and index_resp.json().get("ok"):
                 index_msg_id = index_resp.json()["result"]["message_id"]
+                
+# ================== CHANNEL BACKUP (with cleanup) ==================
+MAX_PART_SIZE = 45 * 1024 * 1024  # 45 MB
+
+def cleanup_old_channel_backup():
+    """Deletes the previous backup (single file or multi-part) from the channel."""
+    global last_backup_message_id, last_backup_part_ids
+    if not CHANNEL_ID:
+        return
+    try:
+        # Unpin old message first
+        if last_backup_message_id:
+            bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
+                             json={"chat_id": CHANNEL_ID, "message_id": last_backup_message_id})
+        # Delete all parts (if any)
+        for part_id in last_backup_part_ids:
+            try:
+                delete_message(CHANNEL_ID, part_id)
+            except:
+                pass
+        # Delete the index/single backup message
+        if last_backup_message_id:
+            try:
+                delete_message(CHANNEL_ID, last_backup_message_id)
+            except:
+                pass
+        # Reset tracking
+        last_backup_message_id = None
+        last_backup_part_ids = []
+    except Exception as e:
+        logger.error(f"Backup cleanup error: {e}")
+
+def save_data_to_channel():
+    global last_backup_message_id, last_backup_part_ids
+    if not CHANNEL_ID: return
+    with backup_lock:
+        try:
+            # 1. Prepare data
+            with data_lock:
+                data = {
+                    "subscribed_users": list(subscribed_users), "user_info": user_info,
+                    "user_balances": user_balances,
+                    "game_balances": game_balances,
+                    "submissions": submissions,
+                    "mother_stock": mother_stock, "mother_accounts": mother_accounts,
+                    "config": config, "referrals": referrals, "referral_bonuses": referral_bonuses,
+                    "leaderboard": leaderboard, "withdraw_requests": withdraw_requests,
+                    "deposit_requests": deposit_requests, "user_last_request": user_last_request,
+                    "transactions": transactions,
+                    "submitted_usernames": list(submitted_usernames),
+                    "rps_daily_wins": rps_daily_wins,
+                    "user_versions": user_versions,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+            json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
+            compressed = gzip.compress(json_bytes, compresslevel=6)
+
+            new_backup_msg_id = None
+            new_part_ids = []
+
+            # 2. Send new backup (single or multi-part)
+            if len(compressed) <= MAX_PART_SIZE:
+                # Single file backup
+                filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
+                resp = bot_session.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                    data={"chat_id": CHANNEL_ID},
+                    files={"document": (filename, compressed, "application/gzip")},
+                    timeout=60
+                )
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    new_backup_msg_id = resp.json()["result"]["message_id"]
+                    new_part_ids = []
+                else:
+                    return  # Do NOT delete old backup if this fails
+
+            else:
+                # Multi-part backup
+                chunks = [compressed[i:i+MAX_PART_SIZE] for i in range(0, len(compressed), MAX_PART_SIZE)]
+                total = len(chunks)
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                for idx, chunk in enumerate(chunks, 1):
+                    part_filename = f"backup_{timestamp}_part{idx}of{total}.json.gz"
+                    resp = bot_session.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                        data={"chat_id": CHANNEL_ID, "caption": f"Part {idx}/{total}"},
+                        files={"document": (part_filename, chunk, "application/gzip")},
+                        timeout=60
+                    )
+                    if resp.status_code == 200 and resp.json().get("ok"):
+                        new_part_ids.append(resp.json()["result"]["message_id"])
+                    else:
+                        logger.error(f"Failed to send backup part {idx}/{total}")
+                        return  # Abort without deleting old backup
+
+                # Index message
+                index_data = {
+                    "backup_id": timestamp,
+                    "parts": new_part_ids,
+                    "total_parts": total,
+                    "timestamp": timestamp
+                }
+                index_text = json.dumps(index_data)
+                index_resp = send_telegram_message(index_text, CHANNEL_ID)
+                if index_resp and index_resp.status_code == 200 and index_resp.json().get("ok"):
+                    new_backup_msg_id = index_resp.json()["result"]["message_id"]
+                else:
+                    return
+
+            # 3. Pin the new backup
+            if new_backup_msg_id:
                 bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
                     "chat_id": CHANNEL_ID,
-                    "message_id": index_msg_id,
+                    "message_id": new_backup_msg_id,
                     "disable_notification": True
                 })
-                last_backup_message_id = index_msg_id
-                last_backup_part_ids = part_ids  # remember parts for later cleanup
+
+            # 4. Now that new backup is safely stored, delete old one
+            cleanup_old_channel_backup()
+
+            # 5. Update tracking variables
+            last_backup_message_id = new_backup_msg_id
+            last_backup_part_ids = new_part_ids
 
         except Exception as e:
             logger.error(f"Channel backup error: {e}")

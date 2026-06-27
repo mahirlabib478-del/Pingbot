@@ -9,7 +9,6 @@ import gzip
 import uuid
 import logging
 import random
-import copy
 from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -422,6 +421,11 @@ def auto_backup_loop():
 
 def auto_restore_from_channel():
     global last_backup_message_id, last_backup_part_ids
+    global subscribed_users, user_info, user_balances, game_balances, submissions
+    global mother_stock, mother_accounts, config, referrals, referral_bonuses
+    global leaderboard, withdraw_requests, deposit_requests, user_last_request
+    global transactions, submitted_usernames, rps_daily_wins, user_versions
+
     if not CHANNEL_ID: return
     try:
         s = get_bot_session()
@@ -477,9 +481,6 @@ def auto_restore_from_channel():
         data = json.loads(decompressed.decode('utf-8'))
 
         with data_lock:
-            global subscribed_users, user_info, user_balances, game_balances, submissions, mother_stock, mother_accounts
-            global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
-            global transactions, submitted_usernames, rps_daily_wins, user_versions
             subscribed_users = set(data.get("subscribed_users", []))
             user_info = data.get("user_info", {})
             user_balances = data.get("user_balances", {})
@@ -656,7 +657,6 @@ def get_target_progress(uid):
         if days_left < 1:
             days_left = 1
 
-        # Safely read config values (config rarely changes, but use lock for consistency)
         with data_lock:
             price_2fa = config.get("price_2fa", 3.0)
             price_cookies = config.get("price_cookies", 3.5)
@@ -1905,7 +1905,6 @@ def handle_telegram_commands():
 
                         # /send command (placeholder – not implemented in original)
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-                            # This command was never implemented; leave as placeholder.
                             pass
 
                         # button handling
@@ -2007,7 +2006,6 @@ def handle_telegram_commands():
                                          files={"document": (f"manual_backup_{datetime.datetime.now():%Y%m%d_%H%M%S}.json.gz", compressed, "application/gzip")})
                             send_telegram_message("✅ ব্যাকআপ তৈরি হয়েছে।", ADMIN_CHAT_ID)
                         elif text == "📥 রিস্টোর" and chat_id == ADMIN_CHAT_ID:
-                            # New working restore command
                             if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
                                 file_id = msg["reply_to_message"]["document"]["file_id"]
                                 try:
@@ -2022,10 +2020,7 @@ def handle_telegram_commands():
                                     decompressed = gzip.decompress(content)
                                     data = json.loads(decompressed.decode('utf-8'))
                                     with data_lock:
-                                        global subscribed_users, user_info, user_balances, game_balances, submissions
-                                        global mother_stock, mother_accounts, config, referrals, referral_bonuses
-                                        global leaderboard, withdraw_requests, deposit_requests, user_last_request
-                                        global transactions, submitted_usernames, rps_daily_wins, user_versions
+                                        # globals already declared at function top
                                         subscribed_users = set(data.get("subscribed_users", []))
                                         user_info = data.get("user_info", {})
                                         user_balances = data.get("user_balances", {})
@@ -2102,6 +2097,11 @@ def broadcast_media(media_type, file_id, caption):
 
 def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode, game_balances
+    global subscribed_users, user_info, user_balances, game_balances, submissions
+    global mother_stock, mother_accounts, config, referrals, referral_bonuses
+    global leaderboard, withdraw_requests, deposit_requests, user_last_request
+    global transactions, submitted_usernames, rps_daily_wins, user_versions
+
     parts = text.split()
     cmd = parts[0].lower()
     if cmd == "/start":

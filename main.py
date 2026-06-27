@@ -18,10 +18,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (ENV VARS) ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "Ping478bot")
+BOT_TOKEN = "8808046131:AAGhmgKxgttdVwfGYHW0tNLQ596LwvZiEAg"
+ADMIN_CHAT_ID = "2035024902"
+CHANNEL_ID = "-1003903695158"
+BOT_USERNAME = "Ping478bot"
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set as environment variables")
@@ -1668,7 +1668,7 @@ def handle_telegram_commands():
                                                   admin_approve_sessions, broadcast_sessions, rps_sessions]:
                                     sess_dict.pop(chat_id, None)
                                 support_sessions.discard(chat_id)
-                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন။",
+                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
                                                       chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                                 user_versions[chat_id] = current_version
                                 schedule_save()
@@ -1885,9 +1885,9 @@ def handle_telegram_commands():
                             del broadcast_sessions[ADMIN_CHAT_ID]
                             continue
 
-                        # /send command
+                        # /send command (placeholder – not implemented in original)
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-                            # unchanged – user can reply to media with /send
+                            # This command was never implemented; leave as placeholder.
                             pass
 
                         # button handling
@@ -2352,6 +2352,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     else:
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
+
 # ================== DAILY TASKS ==================
 def daily_task_loop():
     global last_morning_sent_date, last_evening_sent_date

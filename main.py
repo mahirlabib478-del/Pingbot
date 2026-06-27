@@ -1903,10 +1903,6 @@ def handle_telegram_commands():
                             del broadcast_sessions[ADMIN_CHAT_ID]
                             continue
 
-                        # /send command (placeholder – not implemented in original)
-                        if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-                            pass
-
                         # button handling
                         if chat_type != "private" and text in [
                             "💼 একাউন্ট সাবমিট", "👤 প্রোফাইল", "💰 ব্যালেন্স",
@@ -2020,7 +2016,6 @@ def handle_telegram_commands():
                                     decompressed = gzip.decompress(content)
                                     data = json.loads(decompressed.decode('utf-8'))
                                     with data_lock:
-                                        # globals already declared at function top
                                         subscribed_users = set(data.get("subscribed_users", []))
                                         user_info = data.get("user_info", {})
                                         user_balances = data.get("user_balances", {})
@@ -2345,6 +2340,56 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
     elif cmd == "/rps":
         start_rps(chat_id)
+    elif cmd == "/send" and chat_id == ADMIN_CHAT_ID:
+        # Admin send message to user
+        if len(parts) < 3:
+            send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
+            return
+        target_user = parts[1]
+        message_text = " ".join(parts[2:])
+        send_telegram_message(message_text, target_user)
+        send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
+    elif cmd == "/restore" and chat_id == ADMIN_CHAT_ID:
+        # Restore from backup file (reply to document)
+        if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
+            file_id = msg["reply_to_message"]["document"]["file_id"]
+            try:
+                s = get_bot_session()
+                file_info = s.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+                ).json()
+                file_path = file_info["result"]["file_path"]
+                content = s.get(
+                    f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                ).content
+                decompressed = gzip.decompress(content)
+                data = json.loads(decompressed.decode('utf-8'))
+                with data_lock:
+                    subscribed_users = set(data.get("subscribed_users", []))
+                    user_info = data.get("user_info", {})
+                    user_balances = data.get("user_balances", {})
+                    game_balances = data.get("game_balances", {})
+                    submissions = data.get("submissions", [])
+                    mother_stock = data.get("mother_stock", [])
+                    mother_accounts = data.get("mother_accounts", [])
+                    config = data.get("config", config)
+                    referrals = data.get("referrals", {})
+                    referral_bonuses = data.get("referral_bonuses", {})
+                    leaderboard = data.get("leaderboard", {})
+                    withdraw_requests = data.get("withdraw_requests", [])
+                    deposit_requests = data.get("deposit_requests", [])
+                    user_last_request = data.get("user_last_request", {})
+                    transactions = data.get("transactions", [])
+                    submitted_usernames = set(data.get("submitted_usernames", []))
+                    rps_daily_wins = data.get("rps_daily_wins", {})
+                    user_versions = data.get("user_versions", {})
+                    save_all()
+                send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
+            except Exception as e:
+                logger.exception("Restore error")
+                send_telegram_message(f"❌ রিস্টোর ব্যর্থ: {e}", ADMIN_CHAT_ID)
+        else:
+            send_telegram_message("❗ দয়া করে একটি `.json.gz` ব্যাকআপ ফাইলে রিপ্লাই দিয়ে `/restore` লিখুন।", ADMIN_CHAT_ID)
     elif cmd == "/backup" and chat_id == ADMIN_CHAT_ID:
         with data_lock:
             backup_data = {

@@ -17,14 +17,14 @@ from openpyxl.styles import Font, Alignment
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================== CONFIG ==================
-BOT_TOKEN = "8808046131:AAG7g0k_hhvQV8cLRmh6ieKeuNBdBphfWkk"
-ADMIN_CHAT_ID = "2035024902"
-CHANNEL_ID = "-1003903695158"
-BOT_USERNAME = "Ping478bot"
+# ================== CONFIG (ENV VARS) ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Ping478bot")
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set")
+    raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set as environment variables")
 
 # ================== FILE PATHS ==================
 MOTHER_FILE = "mother_accounts.json"
@@ -99,7 +99,7 @@ rps_sessions = {}
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
 last_backup_message_id = None
-last_backup_part_ids = []           # NEW: to keep track of multi-part backup message IDs
+last_backup_part_ids = []
 
 last_morning_sent_date = None
 last_evening_sent_date = None
@@ -245,10 +245,13 @@ def send_telegram_document(file_bytes, filename, chat_id, caption=""):
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
-    try:
-        bot_session.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
-    except Exception as e:
-        logger.error(f"Delete message error: {e}")
+    for _ in range(3):
+        try:
+            bot_session.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            break
+        except Exception as e:
+            logger.error(f"Delete error: {e}")
+            time.sleep(1)
 
 def broadcast_message(text):
     with data_lock:
@@ -267,16 +270,19 @@ def broadcast_message(text):
             for uid in to_remove:
                 subscribed_users.discard(uid)
                 user_info.pop(uid, None)
-        save_all()   # critical save, keep immediate
+        save_all()   # immediate
 
 def answer_callback_query(callback_id, text=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
     payload = {"callback_query_id": callback_id}
     if text: payload["text"] = text
-    try:
-        bot_session.post(url, json=payload, timeout=5)
-    except Exception as e:
-        logger.error(f"Callback answer error: {e}")
+    for _ in range(3):
+        try:
+            bot_session.post(url, json=payload, timeout=5)
+            break
+        except Exception as e:
+            logger.error(f"Callback answer error: {e}")
+            time.sleep(1)
 
 # ================== CHANNEL BACKUP (with cleanup) ==================
 MAX_PART_SIZE = 45 * 1024 * 1024  # 45 MB
@@ -314,10 +320,7 @@ def save_data_to_channel():
     if not CHANNEL_ID: return
     with backup_lock:
         try:
-            # 1. Remove previous backup from channel
-            cleanup_old_channel_backup()
-
-            # 2. Prepare data
+            # 1. Prepare data
             with data_lock:
                 data = {
                     "subscribed_users": list(subscribed_users), "user_info": user_info,
@@ -337,60 +340,66 @@ def save_data_to_channel():
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
             compressed = gzip.compress(json_bytes, compresslevel=6)
 
-            # 3. Send either single file or multi-part
+            # 2. Send new backup first (temporary)
+            new_backup_ids = []
+            new_part_ids = []
             if len(compressed) <= MAX_PART_SIZE:
-                # Single file backup
+                # Single file
                 filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
                 files = {'document': (filename, compressed, 'application/gzip')}
                 resp = bot_session.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
                 if resp.status_code == 200 and resp.json().get("ok"):
-                    last_backup_message_id = resp.json()["result"]["message_id"]
-                    last_backup_part_ids = []   # single file, no parts
-                    bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
-                        "chat_id": CHANNEL_ID,
-                        "message_id": last_backup_message_id,
-                        "disable_notification": True
-                    })
-                return
-
-            # ---- Multi-part backup ----
-            chunks = [compressed[i:i+MAX_PART_SIZE] for i in range(0, len(compressed), MAX_PART_SIZE)]
-            part_ids = []
-            total = len(chunks)
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            for idx, chunk in enumerate(chunks, 1):
-                part_filename = f"backup_{timestamp}_part{idx}of{total}.json.gz"
-                resp = bot_session.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                    data={"chat_id": CHANNEL_ID, "caption": f"Part {idx}/{total}"},
-                    files={"document": (part_filename, chunk, "application/gzip")},
-                    timeout=60
-                )
-                if resp.status_code == 200 and resp.json().get("ok"):
-                    part_ids.append(resp.json()["result"]["message_id"])
+                    new_backup_ids = [resp.json()["result"]["message_id"]]
                 else:
-                    logger.error(f"Failed to send backup part {idx}/{total}")
+                    logger.error("Failed to send single backup")
+                    return
+            else:
+                # Multi-part backup
+                chunks = [compressed[i:i+MAX_PART_SIZE] for i in range(0, len(compressed), MAX_PART_SIZE)]
+                part_ids = []
+                total = len(chunks)
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                for idx, chunk in enumerate(chunks, 1):
+                    part_filename = f"backup_{timestamp}_part{idx}of{total}.json.gz"
+                    resp = bot_session.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                        data={"chat_id": CHANNEL_ID, "caption": f"Part {idx}/{total}"},
+                        files={"document": (part_filename, chunk, "application/gzip")},
+                        timeout=60
+                    )
+                    if resp.status_code == 200 and resp.json().get("ok"):
+                        part_ids.append(resp.json()["result"]["message_id"])
+                    else:
+                        logger.error(f"Failed to send backup part {idx}/{total}")
+                        return
+                # Index message
+                index_data = {
+                    "backup_id": timestamp,
+                    "parts": part_ids,
+                    "total_parts": total,
+                    "timestamp": timestamp
+                }
+                index_text = json.dumps(index_data)
+                index_resp = send_telegram_message(index_text, CHANNEL_ID)
+                if index_resp and index_resp.status_code == 200 and index_resp.json().get("ok"):
+                    new_backup_ids = [index_resp.json()["result"]["message_id"]]
+                    new_part_ids = part_ids
+                else:
                     return
 
-            # Index message
-            index_data = {
-                "backup_id": timestamp,
-                "parts": part_ids,
-                "total_parts": total,
-                "timestamp": timestamp
-            }
-            index_text = json.dumps(index_data)
-            index_resp = send_telegram_message(index_text, CHANNEL_ID)
-            if index_resp and index_resp.status_code == 200 and index_resp.json().get("ok"):
-                index_msg_id = index_resp.json()["result"]["message_id"]
+            # 3. Now delete old backup
+            cleanup_old_channel_backup()
+
+            # 4. Pin new backup index (or single file)
+            if new_backup_ids:
                 bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
                     "chat_id": CHANNEL_ID,
-                    "message_id": index_msg_id,
+                    "message_id": new_backup_ids[0],
                     "disable_notification": True
                 })
-                last_backup_message_id = index_msg_id
-                last_backup_part_ids = part_ids  # remember parts for later cleanup
+                last_backup_message_id = new_backup_ids[0]
+                last_backup_part_ids = new_part_ids
 
         except Exception as e:
             logger.error(f"Channel backup error: {e}")
@@ -427,9 +436,9 @@ def auto_restore_from_channel():
             combined = bytearray()
             for part_msg_id in part_ids:
                 msg_resp = bot_session.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMessage?chat_id={CHANNEL_ID}&message_id={part_msg_id}",
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getMessage?chat_id={CHANNEL_ID}&message_id={part_msg_id}",
                     timeout=20
-                ).json()
+                ).json()   # Correct endpoint
                 if not msg_resp.get("ok") or "document" not in msg_resp.get("result", {}):
                     logger.error(f"Missing part message {part_msg_id}")
                     return
@@ -446,7 +455,7 @@ def auto_restore_from_channel():
                 ).content
                 combined.extend(part_content)
             compressed = bytes(combined)
-            last_backup_part_ids = part_ids  # remember for cleanup
+            last_backup_part_ids = part_ids
 
         else:
             return
@@ -869,7 +878,7 @@ def process_admin_approve_step(chat_id, text):
                 add_ok(user_id, acc_type, ok_count, amount)
                 distribute_referral_bonus(user_id, amount)
                 record_transaction(user_id, "submission_earning", amount, f"{acc_type.upper()} OK ({ok_count} pcs)")
-                save_all()
+                save_all()   # immediate
                 send_telegram_message(f"✅ সাবমিশন {sub_id} অ্যাপ্রুভ হয়েছে। {ok_count} আইডি ওকে, {amount} টাকা যোগ করা হয়েছে।", ADMIN_CHAT_ID)
                 send_telegram_message(f"🎉 আপনার {ok_count} টি আইডি ওকে হয়েছে! {amount} টাকা আপনার ব্যালেন্সে যোগ হয়েছে।", user_id)
                 break
@@ -1609,7 +1618,7 @@ def handle_telegram_commands():
                         chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # ====== EARLY CANCEL HANDLERS (before version check) ======
+                        # ====== EARLY CANCEL HANDLERS ======
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
                             if ADMIN_CHAT_ID in broadcast_sessions:
                                 del broadcast_sessions[ADMIN_CHAT_ID]
@@ -1659,7 +1668,7 @@ def handle_telegram_commands():
                                                   admin_approve_sessions, broadcast_sessions, rps_sessions]:
                                     sess_dict.pop(chat_id, None)
                                 support_sessions.discard(chat_id)
-                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
+                                send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন။",
                                                       chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                                 user_versions[chat_id] = current_version
                                 schedule_save()
@@ -1878,7 +1887,7 @@ def handle_telegram_commands():
 
                         # /send command
                         if text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-                            # unchanged
+                            # unchanged – user can reply to media with /send
                             pass
 
                         # button handling
@@ -1980,7 +1989,49 @@ def handle_telegram_commands():
                                          files={"document": (f"manual_backup_{datetime.datetime.now():%Y%m%d_%H%M%S}.json.gz", compressed, "application/gzip")})
                             send_telegram_message("✅ ব্যাকআপ তৈরি হয়েছে।", ADMIN_CHAT_ID)
                         elif text == "📥 রিস্টোর" and chat_id == ADMIN_CHAT_ID:
-                            send_telegram_message("📥 .json.gz ব্যাকআপ ফাইলে রিপ্লাই দিয়ে /restore লিখুন।", ADMIN_CHAT_ID)
+                            # New working restore command
+                            if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
+                                file_id = msg["reply_to_message"]["document"]["file_id"]
+                                try:
+                                    file_info = bot_session.get(
+                                        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+                                    ).json()
+                                    file_path = file_info["result"]["file_path"]
+                                    content = bot_session.get(
+                                        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                                    ).content
+                                    decompressed = gzip.decompress(content)
+                                    data = json.loads(decompressed.decode('utf-8'))
+                                    with data_lock:
+                                        global subscribed_users, user_info, user_balances, game_balances, submissions
+                                        global mother_stock, mother_accounts, config, referrals, referral_bonuses
+                                        global leaderboard, withdraw_requests, deposit_requests, user_last_request
+                                        global transactions, submitted_usernames, rps_daily_wins, user_versions
+                                        subscribed_users = set(data.get("subscribed_users", []))
+                                        user_info = data.get("user_info", {})
+                                        user_balances = data.get("user_balances", {})
+                                        game_balances = data.get("game_balances", {})
+                                        submissions = data.get("submissions", [])
+                                        mother_stock = data.get("mother_stock", [])
+                                        mother_accounts = data.get("mother_accounts", [])
+                                        config = data.get("config", config)
+                                        referrals = data.get("referrals", {})
+                                        referral_bonuses = data.get("referral_bonuses", {})
+                                        leaderboard = data.get("leaderboard", {})
+                                        withdraw_requests = data.get("withdraw_requests", [])
+                                        deposit_requests = data.get("deposit_requests", [])
+                                        user_last_request = data.get("user_last_request", {})
+                                        transactions = data.get("transactions", [])
+                                        submitted_usernames = set(data.get("submitted_usernames", []))
+                                        rps_daily_wins = data.get("rps_daily_wins", {})
+                                        user_versions = data.get("user_versions", {})
+                                        save_all()
+                                    send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
+                                except Exception as e:
+                                    logger.exception("Restore error")
+                                    send_telegram_message(f"❌ রিস্টোর ব্যর্থ: {e}", ADMIN_CHAT_ID)
+                            else:
+                                send_telegram_message("❗ দয়া করে একটি `.json.gz` ব্যাকআপ ফাইলে রিপ্লাই দিয়ে `/restore` লিখুন।", ADMIN_CHAT_ID)
                         elif text == "📥 ডিপোজিট রিকোয়েস্ট" and chat_id == ADMIN_CHAT_ID:
                             pending = [d for d in deposit_requests if d["status"] == "pending"]
                             if not pending:
@@ -2042,9 +2093,13 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             if len(parts) > 1 and parts[1].startswith("ref_"):
                 ref_id = parts[1][4:]
                 if ref_id.isdigit() and ref_id != chat_id and chat_id not in referrals:
-                    referrals[chat_id] = ref_id
-                    schedule_save()
-                    send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
+                    # Check if referrer is subscribed
+                    if ref_id in subscribed_users:
+                        referrals[chat_id] = ref_id
+                        schedule_save()
+                        send_telegram_message(f"🎉 আপনি {user_info.get(ref_id, ref_id)}-এর রেফারেলে যুক্ত হয়েছেন!", chat_id)
+                    else:
+                        send_telegram_message("❌ রেফারার বৈধ ইউজার নন।", chat_id)
         send_telegram_message("✨ স্বাগতম! নিচের বাটন ব্যবহার করুন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
     elif cmd == "/maintenance" and chat_id == ADMIN_CHAT_ID:
         args = text[len("/maintenance"):].strip().lower()
@@ -2202,7 +2257,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     dep["status"] = "approved"
                     method_str = dep.get("method", "bkash").upper()
                     record_transaction(user_id, "deposit", dep["amount"], f"Deposit via {method_str} - TrxID: {dep['trxid']}")
-                    save_all()  # immediate for financial ops
+                    save_all()  # immediate
                     send_telegram_message(f"✅ ডিপোজিট {dep_id} অনুমোদিত। {dep['amount']} টাকা যোগ হয়েছে।", ADMIN_CHAT_ID)
                     send_telegram_message(f"✅ আপনার {dep['amount']} টাকার ডিপোজিট অনুমোদিত হয়েছে। বর্তমান ব্যালেন্স: {user_balances[user_id]} টাকা", user_id)
                     break
@@ -2297,7 +2352,6 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     else:
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
-
 # ================== DAILY TASKS ==================
 def daily_task_loop():
     global last_morning_sent_date, last_evening_sent_date
@@ -2342,14 +2396,14 @@ def daily_task_loop():
 
         time.sleep(60)
 
-# ================== DUPLICATE CLEANUP (every 2 days) ==================
+# ================== DUPLICATE CLEANUP (every 7 days) ==================
 def duplicate_cleanup_loop():
     while True:
-        time.sleep(172800)
+        time.sleep(604800)  # 7 days
         with data_lock:
             submitted_usernames.clear()
-            save_all()  # immediate, runs rarely
-        logger.info("Duplicate username set cleared")
+            save_all()
+        logger.info("Duplicate username set cleared (every 7 days)")
 
 # ================== CLEANUP OLD user_versions (every 7 days) ==================
 def user_versions_cleanup_loop():
@@ -2363,6 +2417,14 @@ def user_versions_cleanup_loop():
             save_all()
         logger.info(f"Cleaned {len(inactive)} old user_versions entries")
 
+# ================== DAILY CLEAN (submissions older than 48h) ==================
+def daily_clean():
+    while True:
+        time.sleep(86400)
+        with data_lock:
+            submissions[:] = [s for s in submissions if time.time() - s["timestamp"] < 172800]  # 48 hours
+            save_all()
+
 # ================== FLASK ==================
 @app.route("/")
 def home():
@@ -2372,6 +2434,8 @@ def home():
 if __name__ == "__main__":
     load_all()
     auto_restore_from_channel()
+
+    # Auto version update
     new_build_id = os.environ.get("RENDER_GIT_COMMIT", uuid.uuid4().hex)
     old_build_id = config.get("build_id", "")
     if old_build_id != new_build_id:
@@ -2379,20 +2443,20 @@ if __name__ == "__main__":
         config["build_id"] = new_build_id
         save_all()
         logger.info(f"Auto version updated to {config['bot_version']}")
+
     try:
         bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
-    except: pass
+    except:
+        pass
+
+    # Start background threads
     threading.Thread(target=auto_backup_loop, daemon=True).start()
-    def daily_clean():
-        while True:
-            time.sleep(86400)
-            with data_lock:
-                submissions[:] = [s for s in submissions if time.time() - s["timestamp"] < 172800]
-                save_all()
     threading.Thread(target=daily_clean, daemon=True).start()
     threading.Thread(target=daily_task_loop, daemon=True).start()
     threading.Thread(target=duplicate_cleanup_loop, daemon=True).start()
     threading.Thread(target=user_versions_cleanup_loop, daemon=True).start()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
+
+    # Flask server
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)

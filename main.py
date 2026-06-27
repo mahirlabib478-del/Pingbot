@@ -1714,6 +1714,50 @@ def handle_inline_query(inline_query):
     except Exception as e:
         logger.error(f"Inline answer error: {e}")
 
+# ================== ADMIN HELPERS (for button actions) ==================
+def show_pending_submissions_admin(chat_id):
+    with data_lock:
+        pending = [s for s in submissions if s["status"] == "pending"]
+    if not pending:
+        send_telegram_message("কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
+        return
+    lines = ["📊 **পেন্ডিং সাবমিশন:**\n"]
+    for s in pending[-10:]:   # সাম্প্রতিক ১০টি
+        lines.append(
+            f"ID: `{s['id']}` | ইউজার: {user_info.get(s['user_id'], s['user_id'])} | "
+            f"টাইপ: {'2FA' if s['type']=='2fa' else 'কুকিজ'} | সংখ্যা: {s['count']} | "
+            f"⏳ {datetime.datetime.fromtimestamp(s['timestamp']).strftime('%d/%m %H:%M')}"
+        )
+    send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
+
+def show_deposit_requests_admin(chat_id):
+    with data_lock:
+        pending = [d for d in deposit_requests if d["status"] == "pending"]
+    if not pending:
+        send_telegram_message("কোনো পেন্ডিং ডিপোজিট রিকোয়েস্ট নেই।", chat_id)
+        return
+    lines = ["💳 **পেন্ডিং ডিপোজিট রিকোয়েস্ট:**\n"]
+    for d in pending[-10:]:
+        lines.append(
+            f"ID: `{d['id']}` | ইউজার: {user_info.get(d['user_id'], d['user_id'])} | "
+            f"পরিমাণ: {d['amount']} টাকা | মাধ্যম: {d['method'].upper()} | TrxID: {d['trxid']}"
+        )
+    send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
+
+def show_withdraw_requests_admin(chat_id):
+    with data_lock:
+        pending = [w for w in withdraw_requests if w["status"] == "pending"]
+    if not pending:
+        send_telegram_message("কোনো পেন্ডিং উইথড্র রিকোয়েস্ট নেই।", chat_id)
+        return
+    lines = ["💸 **পেন্ডিং উইথড্র রিকোয়েস্ট:**\n"]
+    for w in pending[-10:]:
+        lines.append(
+            f"ID: `{w['id']}` | ইউজার: {user_info.get(w['user_id'], w['user_id'])} | "
+            f"পরিমাণ: {w['amount']} টাকা | মাধ্যম: {w['method'].upper()} | অ্যাকাউন্ট: {w['account_number']}"
+        )
+    send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
+
 # ================== COMMAND HANDLER ==================
 def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode, config, user_balances, game_balances, user_info, subscribed_users
@@ -2256,6 +2300,66 @@ def handle_telegram_commands():
                         elif text == "🛒 মাদার একাউন্ট কিনুন": start_buy_mother(chat_id)
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
                         elif text == "🎮 RPS গেম": start_rps(chat_id)
+                        # ================== ADMIN BUTTON SHORTCUTS ==================
+                        if chat_id == ADMIN_CHAT_ID:
+                            if text == "📊 সাবমিটেড ফাইল":
+                                show_pending_submissions_admin(chat_id)
+                                continue
+                            elif text == "⚙️ মূল্য নির্ধারণ":
+                                send_telegram_message("দয়া করে /setprice <2fa/cookies> <amount> ব্যবহার করুন।", chat_id)
+                                continue
+                            elif text == "👥 রেফারেল বোনাস %":
+                                send_telegram_message("দয়া করে /setreferral <level1/level2> <percent> ব্যবহার করুন।", chat_id)
+                                continue
+                            elif text == "🔒 সাবমিট লক":
+                                kb = {"inline_keyboard": [
+                                    [{"text": f"2FA {'🔒 বন্ধ' if config.get('lock_2fa') else '🔓 চালু'}", "callback_data": "lock_2fa"}],
+                                    [{"text": f"কুকিজ {'🔒 বন্ধ' if config.get('lock_cookies') else '🔓 চালু'}", "callback_data": "lock_cookies"}]
+                                ]}
+                                send_telegram_message("কোন সাবমিট লক টগল করবেন?", chat_id, reply_markup=kb)
+                                continue
+                            elif text == "📢 ব্রডকাস্ট":
+                                admin_broadcast_prompt(chat_id)
+                                continue
+                            elif text == "➕ মাদার একাউন্ট যোগ":
+                                start_add_mother_stock(chat_id)
+                                continue
+                            elif text == "📦 মাদার স্টক":
+                                show_mother_stock_detail(chat_id)
+                                continue
+                            elif text == "💰 মাদার মূল্য সেট":
+                                send_telegram_message("মাদার একাউন্টের মূল্য সেট করতে /setmotherprice <amount>", chat_id)
+                                continue
+                            elif text == "📋 ইউজার লিস্ট":
+                                with data_lock:
+                                    users = list(subscribed_users)
+                                send_telegram_message(f"মোট সাবস্ক্রাইবার: {len(users)}", chat_id)
+                                continue
+                            elif text == "✉️ ইউজারকে মেসেজ":
+                                send_telegram_message("ইউজারকে মেসেজ পাঠাতে /usermessage <user_id> <message>", chat_id)
+                                continue
+                            elif text == "📁 ব্যাকআপ":
+                                save_data_to_channel()
+                                send_telegram_message("📁 ব্যাকআপ চ্যানেলে পাঠানো হয়েছে।", chat_id)
+                                continue
+                            elif text == "📥 রিস্টোর":
+                                send_telegram_message("কোনো ব্যাকআপ ফাইল বা ইনডেক্স মেসেজে রিপ্লাই দিয়ে /restore কমান্ড দিন।", chat_id)
+                                continue
+                            elif text == "📥 ডিপোজিট রিকোয়েস্ট":
+                                show_deposit_requests_admin(chat_id)
+                                continue
+                            elif text == "💳 উইথড্র রিকোয়েস্ট":
+                                show_withdraw_requests_admin(chat_id)
+                                continue
+                            elif text == "💳 বিকাশ নম্বর সেট":
+                                send_telegram_message(f"বর্তমান বিকাশ নম্বর: {config.get('bkash_number', '')}\nপরিবর্তন করতে /setbkash <number>", chat_id)
+                                continue
+                            elif text == "💳 নগদ নম্বর সেট":
+                                send_telegram_message(f"বর্তমান নগদ নম্বর: {config.get('nagad_number', '')}\nপরিবর্তন করতে /setnagad <number>", chat_id)
+                                continue
+                            elif text == "🔙 মূল মেনু":
+                                send_telegram_message("🔝 মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, "private"))
+                                continue
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                         elif text.startswith("/"):

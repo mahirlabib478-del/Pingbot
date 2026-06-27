@@ -977,7 +977,7 @@ def process_mother_buy_step(chat_id, text):
             del submission_sessions[chat_id]
             return True
 
-        # Separate the accounts to buy
+        # একবারই স্টক থেকে আলাদা করা হচ্ছে (আগের ডুপ্লিকেট অংশ মুছে ফেলা হয়েছে)
         to_buy = []
         new_stock = []
         bought = 0
@@ -989,7 +989,7 @@ def process_mother_buy_step(chat_id, text):
                 new_stock.append(acc)
         mother_stock[:] = new_stock
 
-        # Deduct from game balance first, then main balance
+        # গেম ব্যালেন্স আগে কাটুন, বাকি মেইন থেকে
         remaining = total
         game_used = 0
         main_used = 0

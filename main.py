@@ -9,6 +9,7 @@ import gzip
 import uuid
 import logging
 import random
+import copy
 from flask import Flask
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -18,10 +19,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (ENV VARS) ==================
-BOT_TOKEN = "8808046131:AAGhmgKxgttdVwfGYHW0tNLQ596LwvZiEAg"
-ADMIN_CHAT_ID = "2035024902"
-CHANNEL_ID = "-1003903695158"
-BOT_USERNAME = "Ping478bot"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Ping478bot")
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set as environment variables")
@@ -46,6 +47,16 @@ RPS_WINS_FILE = "rps_daily_wins.json"
 USER_VERSIONS_FILE = "user_versions.json"
 
 app = Flask(__name__)
+
+# ================== THREAD-LOCAL SESSION ==================
+thread_local = threading.local()
+
+def get_bot_session():
+    if not hasattr(thread_local, "session"):
+        s = requests.Session()
+        s.headers.update({"Connection": "keep-alive"})
+        thread_local.session = s
+    return thread_local.session
 
 # ================== GLOBALS ==================
 last_update_id = None
@@ -103,10 +114,6 @@ last_backup_part_ids = []
 
 last_morning_sent_date = None
 last_evening_sent_date = None
-
-# ================== HTTP SESSION ==================
-bot_session = requests.Session()
-bot_session.headers.update({"Connection": "keep-alive"})
 
 # ================== DEBOUNCED SAVE ==================
 save_scheduled = False
@@ -217,9 +224,10 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup: payload["reply_markup"] = reply_markup
     if parse_mode: payload["parse_mode"] = parse_mode
+    s = get_bot_session()
     for _ in range(3):
         try:
-            resp = bot_session.post(url, json=payload, timeout=10)
+            resp = s.post(url, json=payload, timeout=10)
             if resp.status_code == 429:
                 retry = resp.json().get("parameters", {}).get("retry_after", 2)
                 time.sleep(retry)
@@ -232,10 +240,11 @@ def send_telegram_message(text, chat_id, reply_markup=None, parse_mode=None):
 
 def send_telegram_document(file_bytes, filename, chat_id, caption=""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    s = get_bot_session()
     try:
         files = {'document': (filename, file_bytes,
                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-        resp = bot_session.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
+        resp = s.post(url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=30)
         if resp.status_code == 200 and resp.json().get("ok"):
             return resp.json()
         return None
@@ -245,9 +254,10 @@ def send_telegram_document(file_bytes, filename, chat_id, caption=""):
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
+    s = get_bot_session()
     for _ in range(3):
         try:
-            bot_session.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            s.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
             break
         except Exception as e:
             logger.error(f"Delete error: {e}")
@@ -276,9 +286,10 @@ def answer_callback_query(callback_id, text=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
     payload = {"callback_query_id": callback_id}
     if text: payload["text"] = text
+    s = get_bot_session()
     for _ in range(3):
         try:
-            bot_session.post(url, json=payload, timeout=5)
+            s.post(url, json=payload, timeout=5)
             break
         except Exception as e:
             logger.error(f"Callback answer error: {e}")
@@ -293,10 +304,11 @@ def cleanup_old_channel_backup():
     if not CHANNEL_ID:
         return
     try:
+        s = get_bot_session()
         # Unpin old message first
         if last_backup_message_id:
-            bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
-                             json={"chat_id": CHANNEL_ID, "message_id": last_backup_message_id})
+            s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/unpinChatMessage",
+                   json={"chat_id": CHANNEL_ID, "message_id": last_backup_message_id})
         # Delete all parts (if any)
         for part_id in last_backup_part_ids:
             try:
@@ -309,9 +321,6 @@ def cleanup_old_channel_backup():
                 delete_message(CHANNEL_ID, last_backup_message_id)
             except:
                 pass
-        # Reset tracking
-        last_backup_message_id = None
-        last_backup_part_ids = []
     except Exception as e:
         logger.error(f"Backup cleanup error: {e}")
 
@@ -343,12 +352,13 @@ def save_data_to_channel():
             # 2. Send new backup first (temporary)
             new_backup_ids = []
             new_part_ids = []
+            s = get_bot_session()
             if len(compressed) <= MAX_PART_SIZE:
                 # Single file
                 filename = f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json.gz"
-                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
                 files = {'document': (filename, compressed, 'application/gzip')}
-                resp = bot_session.post(url, data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
+                resp = s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                              data={"chat_id": CHANNEL_ID}, files=files, timeout=60)
                 if resp.status_code == 200 and resp.json().get("ok"):
                     new_backup_ids = [resp.json()["result"]["message_id"]]
                 else:
@@ -362,7 +372,7 @@ def save_data_to_channel():
                 timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 for idx, chunk in enumerate(chunks, 1):
                     part_filename = f"backup_{timestamp}_part{idx}of{total}.json.gz"
-                    resp = bot_session.post(
+                    resp = s.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                         data={"chat_id": CHANNEL_ID, "caption": f"Part {idx}/{total}"},
                         files={"document": (part_filename, chunk, "application/gzip")},
@@ -393,11 +403,12 @@ def save_data_to_channel():
 
             # 4. Pin new backup index (or single file)
             if new_backup_ids:
-                bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
+                s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/pinChatMessage", json={
                     "chat_id": CHANNEL_ID,
                     "message_id": new_backup_ids[0],
                     "disable_notification": True
                 })
+                # Update globals inside backup_lock for safety
                 last_backup_message_id = new_backup_ids[0]
                 last_backup_part_ids = new_part_ids
 
@@ -413,7 +424,8 @@ def auto_restore_from_channel():
     global last_backup_message_id, last_backup_part_ids
     if not CHANNEL_ID: return
     try:
-        resp = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}", timeout=20).json()
+        s = get_bot_session()
+        resp = s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?chat_id={CHANNEL_ID}", timeout=20).json()
         if not resp.get("ok"): return
         pinned = resp["result"].get("pinned_message")
         if not pinned: return
@@ -421,10 +433,10 @@ def auto_restore_from_channel():
         # ----- Case 1: Single file (document) -----
         if "document" in pinned:
             file_id = pinned["document"]["file_id"]
-            file_info = bot_session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
+            file_info = s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
             if not file_info.get("ok"): return
             file_path = file_info["result"]["file_path"]
-            content = bot_session.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
+            content = s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=60).content
             compressed = content
             last_backup_part_ids = []  # single file
 
@@ -435,21 +447,21 @@ def auto_restore_from_channel():
             if not part_ids: return
             combined = bytearray()
             for part_msg_id in part_ids:
-                msg_resp = bot_session.get(
+                msg_resp = s.get(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/getMessage?chat_id={CHANNEL_ID}&message_id={part_msg_id}",
                     timeout=20
-                ).json()   # Correct endpoint
+                ).json()
                 if not msg_resp.get("ok") or "document" not in msg_resp.get("result", {}):
                     logger.error(f"Missing part message {part_msg_id}")
                     return
                 file_id = msg_resp["result"]["document"]["file_id"]
-                file_info = bot_session.get(
+                file_info = s.get(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}",
                     timeout=20
                 ).json()
                 if not file_info.get("ok"): return
                 file_path = file_info["result"]["file_path"]
-                part_content = bot_session.get(
+                part_content = s.get(
                     f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
                     timeout=60
                 ).content
@@ -644,8 +656,10 @@ def get_target_progress(uid):
         if days_left < 1:
             days_left = 1
 
-        price_2fa = config.get("price_2fa", 3.0)
-        price_cookies = config.get("price_cookies", 3.5)
+        # Safely read config values (config rarely changes, but use lock for consistency)
+        with data_lock:
+            price_2fa = config.get("price_2fa", 3.0)
+            price_cookies = config.get("price_cookies", 3.5)
 
         current_income = entry.get("current_month_income", 0.0)
         remaining = max(0, target - current_income)
@@ -1018,12 +1032,12 @@ def process_mother_buy_step(chat_id, text):
         schedule_save()
 
     send_telegram_message("🔄 আপনার মাদার একাউন্ট প্রসেস হচ্ছে...", chat_id)
-    threading.Thread(target=deliver_mother_purchase, args=(chat_id, to_buy, qty, total), daemon=True).start()
+    threading.Thread(target=deliver_mother_purchase, args=(chat_id, to_buy, qty, total, game_used, main_used), daemon=True).start()
     del submission_sessions[chat_id]
     send_telegram_message("🔝", chat_id, reply_markup=get_main_keyboard(chat_id))
     return True
 
-def deliver_mother_purchase(chat_id, to_buy, qty, total):
+def deliver_mother_purchase(chat_id, to_buy, qty, total, game_used, main_used):
     excel = generate_mother_purchase_excel(to_buy)
     if send_telegram_document(excel, f"mother_{chat_id}_{int(time.time())}.xlsx", chat_id,
                               caption=f"{qty} টি মাদার একাউন্ট কেনা হয়েছে। মোট মূল্য: {total} টাকা"):
@@ -1035,7 +1049,11 @@ def deliver_mother_purchase(chat_id, to_buy, qty, total):
     else:
         with data_lock:
             mother_stock.extend(to_buy)
-            user_balances[str(chat_id)] = user_balances.get(str(chat_id), 0) + total
+            # Refund exactly what was taken
+            if game_used > 0:
+                game_balances[str(chat_id)] = game_balances.get(str(chat_id), 0) + game_used
+            if main_used > 0:
+                user_balances[str(chat_id)] = user_balances.get(str(chat_id), 0) + main_used
             schedule_save()
         send_telegram_message("⚠️ ডেলিভারি ব্যর্থ। টাকা ফেরত দেওয়া হয়েছে।", chat_id)
 
@@ -1179,7 +1197,7 @@ def show_mother_stock_detail(chat_id, page=0, message_id=None):
     keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_motherstock"}])
 
     if message_id:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
             "chat_id": chat_id,
             "message_id": message_id,
             "text": "\n".join(lines),
@@ -1193,7 +1211,7 @@ def show_mother_stock_detail_refresh(chat_id, message_id, page=None):
         available = [(i, acc) for i, acc in enumerate(mother_stock) if not acc.get("sold")]
     if not available:
         try:
-            bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
                 "chat_id": chat_id, "message_id": message_id,
                 "text": "📦 মাদার স্টক খালি।",
             })
@@ -1237,7 +1255,7 @@ def show_free_mother_list(chat_id, page=0, message_id=None):
         keyboard_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_freemotherlist"}])
 
     if message_id:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
             "chat_id": chat_id, "message_id": message_id,
             "text": "\n".join(lines),
             "reply_markup": {"inline_keyboard": keyboard_rows}
@@ -1249,7 +1267,7 @@ def show_free_mother_list_refresh(chat_id, message_id, page=None):
     with data_lock:
         if not mother_accounts:
             try:
-                bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+                get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
                     "chat_id": chat_id, "message_id": message_id,
                     "text": "🎁 ফ্রি মাদার একাউন্ট তালিকা খালি।",
                 })
@@ -1422,15 +1440,15 @@ def forward_support_message(chat_id, msg):
     if "text" in msg:
         send_telegram_message(f"📩 সাপোর্ট মেসেজ\nইউজার: {sender} ({chat_id})\n\n{msg['text']}", ADMIN_CHAT_ID)
     elif "photo" in msg:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
                       json={"chat_id": ADMIN_CHAT_ID, "photo": msg["photo"][-1]["file_id"],
                             "caption": f"📩 সাপোর্ট ছবি\nইউজার: {sender} ({chat_id})\n{msg.get('caption','')}"})
     elif "document" in msg:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                       json={"chat_id": ADMIN_CHAT_ID, "document": msg["document"]["file_id"],
                             "caption": f"📩 সাপোর্ট ফাইল\nইউজার: {sender} ({chat_id})\n{msg.get('caption','')}"})
     elif "voice" in msg:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
                       json={"chat_id": ADMIN_CHAT_ID, "voice": msg["voice"]["file_id"],
                             "caption": f"📩 সাপোর্ট ভয়েস\nইউজার: {sender} ({chat_id})"})
     cancel_kb = {"inline_keyboard": [[{"text": "❌ সাপোর্ট বন্ধ করুন", "callback_data": "cancel_session"}]]}
@@ -1582,7 +1600,7 @@ def handle_inline_query(inline_query):
         "cache_time": 0
     }
     try:
-        bot_session.post(url, json=payload, timeout=10)
+        get_bot_session().post(url, json=payload, timeout=10)
     except Exception as e:
         logger.error(f"Inline answer error: {e}")
 
@@ -1598,7 +1616,7 @@ def handle_telegram_commands():
             params = {"timeout": 30, "allowed_updates": ["message", "callback_query", "inline_query"]}
             if last_update_id:
                 params["offset"] = last_update_id + 1
-            resp = bot_session.get(url, params=params, timeout=35).json()
+            resp = get_bot_session().get(url, params=params, timeout=35).json()
             if resp.get("ok") and resp.get("result"):
                 for update in resp["result"]:
                     last_update_id = update["update_id"]
@@ -1692,7 +1710,7 @@ def handle_telegram_commands():
                         elif data.startswith("getfile_") and chat_id == ADMIN_CHAT_ID:
                             sub = next((s for s in submissions if s["id"] == data[8:]), None)
                             if sub and "file_id" in sub:
-                                bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                                get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                                              json={"chat_id": ADMIN_CHAT_ID, "document": sub["file_id"]})
                         elif data.startswith("approve_") and chat_id == ADMIN_CHAT_ID:
                             admin_approve_start(data[8:])
@@ -1984,7 +2002,7 @@ def handle_telegram_commands():
                                 }
                             json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
                             compressed = gzip.compress(json_bytes)
-                            bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                            get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                                          data={"chat_id": ADMIN_CHAT_ID},
                                          files={"document": (f"manual_backup_{datetime.datetime.now():%Y%m%d_%H%M%S}.json.gz", compressed, "application/gzip")})
                             send_telegram_message("✅ ব্যাকআপ তৈরি হয়েছে।", ADMIN_CHAT_ID)
@@ -1993,11 +2011,12 @@ def handle_telegram_commands():
                             if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
                                 file_id = msg["reply_to_message"]["document"]["file_id"]
                                 try:
-                                    file_info = bot_session.get(
+                                    s = get_bot_session()
+                                    file_info = s.get(
                                         f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
                                     ).json()
                                     file_path = file_info["result"]["file_path"]
-                                    content = bot_session.get(
+                                    content = s.get(
                                         f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
                                     ).content
                                     decompressed = gzip.decompress(content)
@@ -2072,10 +2091,11 @@ def broadcast_media(media_type, file_id, caption):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/send{media_type.capitalize()}"
     with data_lock:
         users = list(subscribed_users)
+    s = get_bot_session()
     for uid in users:
         try:
             payload = {"chat_id": uid, media_type: file_id, "caption": caption}
-            bot_session.post(url, json=payload, timeout=10)
+            s.post(url, json=payload, timeout=10)
         except:
             pass
         time.sleep(0.05)
@@ -2344,7 +2364,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             }
         json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
         compressed = gzip.compress(json_bytes)
-        resp = bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+        resp = get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                              data={"chat_id": ADMIN_CHAT_ID},
                              files={"document": (f"manual_backup_{datetime.datetime.now():%Y%m%d_%H%M%S}.json.gz", compressed, "application/gzip")})
         if resp.ok: send_telegram_message("✅ ব্যাকআপ তৈরি হয়েছে।", ADMIN_CHAT_ID)
@@ -2362,7 +2382,9 @@ def daily_task_loop():
 
         if now.hour == 3 and now.minute == 0 and last_morning_sent_date != today_str:
             last_morning_sent_date = today_str
-            for uid in list(subscribed_users):
+            with data_lock:
+                users = list(subscribed_users)
+            for uid in users:
                 progress = get_target_progress(uid)
                 if progress:
                     msg = (
@@ -2380,7 +2402,9 @@ def daily_task_loop():
 
         if now.hour == 15 and now.minute == 0 and last_evening_sent_date != today_str:
             last_evening_sent_date = today_str
-            for uid in list(subscribed_users):
+            with data_lock:
+                users = list(subscribed_users)
+            for uid in users:
                 progress = get_target_progress(uid)
                 if progress and progress['remaining'] > 0:
                     msg = (
@@ -2446,7 +2470,7 @@ if __name__ == "__main__":
         logger.info(f"Auto version updated to {config['bot_version']}")
 
     try:
-        bot_session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except:
         pass
 

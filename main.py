@@ -110,6 +110,9 @@ last_backup_part_file_ids = []
 last_morning_sent_date = None
 last_evening_sent_date = None
 
+# ---------- NEW: Flag to temporarily disable channel backup during auto-restore ----------
+_skip_channel_backup = False
+
 # Thread-local session
 _thread_local = threading.local()
 
@@ -359,6 +362,8 @@ def cleanup_old_channel_backup():
 def save_data_to_channel():
     global last_backup_message_id, last_backup_part_ids, last_backup_part_file_ids
     if not CHANNEL_ID: return
+    if _skip_channel_backup:   # <-- NEW: skip if flag is set
+        return
     with backup_lock:
         try:
             with data_lock:
@@ -496,7 +501,7 @@ def apply_restored_data(data):
     save_all()
 
 def auto_restore_from_channel():
-    global last_backup_message_id, last_backup_part_ids, last_backup_part_file_ids
+    global last_backup_message_id, last_backup_part_ids, last_backup_part_file_ids, _skip_channel_backup
     if not CHANNEL_ID: return
     try:
         session = get_bot_session()
@@ -559,11 +564,19 @@ def auto_restore_from_channel():
             return
 
         data = restore_data_from_payload(compressed)
-        apply_restored_data(data)
+
+        # অটো-রিস্টোর চলাকালে চ্যানেল ব্যাকআপ বন্ধ রাখতে ফ্ল্যাগ সেট
+        _skip_channel_backup = True
+        try:
+            apply_restored_data(data)
+        finally:
+            _skip_channel_backup = False
+
         with data_lock:
             last_backup_message_id = pinned["message_id"]
         logger.info("Data restored from channel backup successfully")
     except Exception as e:
+        _skip_channel_backup = False
         logger.error(f"Auto-restore error: {e}")
 
 # ================== KEYBOARDS ==================

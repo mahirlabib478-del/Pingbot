@@ -766,47 +766,27 @@ def process_submission_step(chat_id, text, sender_username):
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "username":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines:
-        send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
-        return True
-
-    # ===== নতুন: ফাইলের ভেতর নিজস্ব ডুপ্লিকেট বাদ দিন =====
-    seen = set()
-    unique_without_dup = []
-    duplicates_in_file = []
-    for u in lines:
-        if u not in seen:
-            seen.add(u)
-            unique_without_dup.append(u)
-        else:
-            duplicates_in_file.append(u)
-
-    if duplicates_in_file:
-        send_telegram_message(
-            f"⚠️ আপনার ফাইলে {len(duplicates_in_file)} টি ইউজারনেম একাধিকবার আছে। "
-            f"শুধু ইউনিক ইউজারনেম নেওয়া হবে ({len(unique_without_dup)} টি)।",
-            chat_id, reply_markup=cancel_kb
-        )
-
-    # ===== এখন গ্লোবাল ডুপ্লিকেট চেক (আগের সাবমিশনের সাথে) =====
-    duplicates = [u for u in unique_without_dup if u in submitted_usernames]
-    unique = [u for u in unique_without_dup if u not in submitted_usernames]
-
-    if duplicates:
-        send_telegram_message(
-            f"⚠️ {len(duplicates)} টি ইউজারনেম আগেই জমা হয়েছে। শুধু নতুন {len(unique)} টি নেওয়া হবে।",
-            chat_id, reply_markup=cancel_kb
-        )
-    if not unique:
-        send_telegram_message("❌ সমস্ত ইউজারনেম ডুপ্লিকেট বা আগে জমা হয়েছে! সাবমিট বাতিল।", chat_id)
-        del submission_sessions[chat_id]
-        return True
-
+        if not lines:
+            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
+            return True
+        # গ্লোবাল ডুপ্লিকেট চেক (আগের সাবমিশনের সাথে)
+        duplicates = [u for u in lines if u in submitted_usernames]
+        unique = [u for u in lines if u not in submitted_usernames]
+        if duplicates:
+            send_telegram_message(
+                f"⚠️ {len(duplicates)} টি ইউজারনেম আগেই জমা হয়েছে। শুধু নতুন {len(unique)} টি নেওয়া হবে।",
+                chat_id, reply_markup=cancel_kb
+            )
+        if not unique:
+            send_telegram_message("❌ সমস্ত ইউজারনেম আগে জমা হয়েছে! সাবমিট বাতিল।", chat_id)
+            del submission_sessions[chat_id]
+            return True
         session["usernames"] = unique
         session["step"] = "password"
         send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
-                         chat_id, reply_markup=cancel_kb)
+                             chat_id, reply_markup=cancel_kb)
         return True
+
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if len(lines) != len(session["usernames"]):
@@ -816,6 +796,7 @@ def process_submission_step(chat_id, text, sender_username):
         session["step"] = "2fa"
         send_telegram_message("🔐 এখন **2FA কী** লিস্ট দিন (প্রতি লাইনে, ফাঁকা রাখা যাবে):", chat_id, reply_markup=cancel_kb)
         return True
+
     elif step == "2fa":
         raw_lines = text.splitlines()
         twofa_list = [l.strip() for l in raw_lines]
@@ -841,6 +822,26 @@ def process_submission_step(chat_id, text, sender_username):
     return False
 
 def process_submission_heavy(usernames, passwords, twofa_list, sender_username, chat_id, acc_type):
+    # ===== ফাইলের ভেতর নিজস্ব ডুপ্লিকেট বাদ দেওয়া =====
+    seen = set()
+    unique_usernames = []
+    unique_passwords = []
+    unique_2fa = []
+    duplicate_count = 0
+    for i, u in enumerate(usernames):
+        if u not in seen:
+            seen.add(u)
+            unique_usernames.append(u)
+            unique_passwords.append(passwords[i] if i < len(passwords) else "")
+            unique_2fa.append(twofa_list[i] if i < len(twofa_list) else "")
+        else:
+            duplicate_count += 1
+    # এখন unique লিস্ট ব্যবহার করব
+    usernames = unique_usernames
+    passwords = unique_passwords
+    twofa_list = unique_2fa
+    # ===== ডুপ্লিকেট ফিল্টার শেষ =====
+
     type_label = "কুকিজ" if acc_type == "cookies" else "2FA"
     filename = f"{sender_username}_{chat_id}_{len(usernames)}pcs_{type_label}.xlsx"
     excel_bytes = generate_submission_excel(usernames, passwords, twofa_list, sender_username)
@@ -861,10 +862,18 @@ def process_submission_heavy(usernames, passwords, twofa_list, sender_username, 
             })
             update_user_submission_stats(chat_id, acc_type, len(usernames))
             schedule_save()
-        send_telegram_message("✅ আপনার ফাইল অ্যাডমিনের কাছে পাঠানো হয়েছে।", chat_id)
+        # ইউজারকে মেসেজ
+        if duplicate_count > 0:
+            send_telegram_message(
+                f"✅ আপনার ফাইল থেকে {duplicate_count} টি ডুপ্লিকেট ইউজারনেম বাদ দেওয়া হয়েছে। "
+                f"মোট {len(usernames)} টি ইউনিক একাউন্ট জমা হয়েছে।",
+                chat_id
+            )
+        else:
+            send_telegram_message("✅ আপনার ফাইল অ্যাডমিনের কাছে পাঠানো হয়েছে।", chat_id)
     else:
         send_telegram_message("⚠️ ফাইল পাঠাতে সমস্যা হয়েছে। পরে চেষ্টা করুন।", chat_id)
-
+        
 def update_user_submission_stats(user_id, acc_type, count):
     with data_lock:
         init_leaderboard_entry(user_id)

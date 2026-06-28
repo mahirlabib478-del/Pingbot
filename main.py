@@ -765,7 +765,7 @@ def process_submission_step(chat_id, text, sender_username):
     step = session["step"]
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "username":
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
         return True

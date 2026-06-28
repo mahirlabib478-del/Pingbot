@@ -765,26 +765,48 @@ def process_submission_step(chat_id, text, sender_username):
     step = session["step"]
     cancel_kb = {"inline_keyboard": [[{"text": "❌ বাতিল", "callback_data": "cancel_session"}]]}
     if step == "username":
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
-            send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
-            return True
-        duplicates = [u for u in lines if u in submitted_usernames]
-        unique = [u for u in lines if u not in submitted_usernames]
-        if duplicates:
-            send_telegram_message(
-                f"⚠️ {len(duplicates)} টি ইউজারনেম আগেই জমা হয়েছে। শুধু নতুন {len(unique)} টি নেওয়া হবে।",
-                chat_id, reply_markup=cancel_kb
-            )
-        if not unique:
-            send_telegram_message("❌ সমস্ত ইউজারনেম ডুপ্লিকেট! সাবমিট বাতিল।", chat_id)
-            del submission_sessions[chat_id]
-            return True
-        session["usernames"] = unique
-        session["step"] = "password"
-        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
-                             chat_id, reply_markup=cancel_kb)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        send_telegram_message("⚠️ কমপক্ষে একটি ইউজারনেম দিন।", chat_id, reply_markup=cancel_kb)
         return True
+
+    # ===== নতুন: ফাইলের ভেতর নিজস্ব ডুপ্লিকেট বাদ দিন =====
+    seen = set()
+    unique_without_dup = []
+    duplicates_in_file = []
+    for u in lines:
+        if u not in seen:
+            seen.add(u)
+            unique_without_dup.append(u)
+        else:
+            duplicates_in_file.append(u)
+
+    if duplicates_in_file:
+        send_telegram_message(
+            f"⚠️ আপনার ফাইলে {len(duplicates_in_file)} টি ইউজারনেম একাধিকবার আছে। "
+            f"শুধু ইউনিক ইউজারনেম নেওয়া হবে ({len(unique_without_dup)} টি)।",
+            chat_id, reply_markup=cancel_kb
+        )
+
+    # ===== এখন গ্লোবাল ডুপ্লিকেট চেক (আগের সাবমিশনের সাথে) =====
+    duplicates = [u for u in unique_without_dup if u in submitted_usernames]
+    unique = [u for u in unique_without_dup if u not in submitted_usernames]
+
+    if duplicates:
+        send_telegram_message(
+            f"⚠️ {len(duplicates)} টি ইউজারনেম আগেই জমা হয়েছে। শুধু নতুন {len(unique)} টি নেওয়া হবে।",
+            chat_id, reply_markup=cancel_kb
+        )
+    if not unique:
+        send_telegram_message("❌ সমস্ত ইউজারনেম ডুপ্লিকেট বা আগে জমা হয়েছে! সাবমিট বাতিল।", chat_id)
+        del submission_sessions[chat_id]
+        return True
+
+    session["usernames"] = unique
+    session["step"] = "password"
+    send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
+                         chat_id, reply_markup=cancel_kb)
+    return True
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if len(lines) != len(session["usernames"]):

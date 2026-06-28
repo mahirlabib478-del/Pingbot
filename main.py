@@ -802,11 +802,11 @@ def process_submission_step(chat_id, text, sender_username):
         del submission_sessions[chat_id]
         return True
 
-    session["usernames"] = unique
-    session["step"] = "password"
-    send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
+        session["usernames"] = unique
+        session["step"] = "password"
+        send_telegram_message(f"🔑 এখন **পাসওয়ার্ড** লিস্ট দিন (প্রতি লাইনে একটি):\n\nআপনার ইউজারনেম সংখ্যা: {len(unique)}",
                          chat_id, reply_markup=cancel_kb)
-    return True
+        return True
     elif step == "password":
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if len(lines) != len(session["usernames"]):

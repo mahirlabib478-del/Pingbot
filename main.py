@@ -847,6 +847,7 @@ def process_submission_heavy(usernames, passwords, twofa_list, sender_username, 
         return sub_id      
     else:
         send_telegram_message("⚠️ ফাইল পাঠাতে সমস্যা হয়েছে। পরে চেষ্টা করুন।", chat_id)
+        return None
 
 def update_user_submission_stats(user_id, acc_type, count):
     with data_lock:

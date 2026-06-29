@@ -2023,6 +2023,8 @@ def handle_telegram_commands():
                                     date_str = datetime.datetime.fromtimestamp(t["timestamp"]).strftime("%d/%m/%Y %H:%M")
                                     lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
                                 send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
+                        elif data.startswith("cupgame_"):
+                            process_cupgame_callback(chat_id, data)       
                         continue
 
                     if "message" in update:

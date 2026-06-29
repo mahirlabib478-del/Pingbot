@@ -844,6 +844,7 @@ def process_submission_heavy(usernames, passwords, twofa_list, sender_username, 
             )
         else:
             send_telegram_message("✅ আপনার ফাইল অ্যাডমিনের কাছে পাঠানো হয়েছে।", chat_id)
+        return sub_id      
     else:
         send_telegram_message("⚠️ ফাইল পাঠাতে সমস্যা হয়েছে। পরে চেষ্টা করুন।", chat_id)
 
@@ -1870,40 +1871,38 @@ def handle_telegram_commands():
                             process_bet_amount(chat_id, amt)
                             continue
                         if data == "betbot":
-                            # from submission flow
-                            if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
-                                session = submission_sessions[chat_id]
-                                # need to first submit, then bet
-                                # submit in background
-                                threading.Thread(target=process_submission_heavy, args=(
-                                    session["usernames"], session["passwords"], session["twofa_list"],
-                                    user_info[chat_id], chat_id, session["type"]
-                                ), daemon=True).start()
-                                # now create bet session - but we need sub_id, wait? We'll use a placeholder; better: process submission now and get sub_id, but that's async.
-                                # Simplified: mark that user wants bot bet, after submission we'll start bet session. We'll set a flag and check after file is sent.
-                                # Actually easier: we'll submit first, then after we get sub_id we'll trigger bet. We'll modify process_submission_heavy to accept a callback.
-                                # For brevity, we'll just show pending bets list instead.
-                                send_telegram_message("✅ সাবমিট প্রসেস হচ্ছে। বেট করার জন্য পেন্ডিং সাবমিশন থেকে সিলেক্ট করুন।", chat_id)
-                                del submission_sessions[chat_id]  # clear session
-                                # show pending bets list
+                        # from submission flow
+                             if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
+                                 session = submission_sessions[chat_id]
+                                 # সাবমিট সিঙ্ক্রোনাসলি সম্পন্ন করি
+                                 sub_id = process_submission_heavy(
+                                     session["usernames"], session["passwords"], session["twofa_list"],
+                                     user_info[chat_id], chat_id, session["type"]
+                                 )
+                                 del submission_sessions[chat_id]  # clear session
+                                 if sub_id:
+                                     start_bet_session(chat_id, sub_id, "bot")
+                                 else:
+                                     send_telegram_message("❌ সাবমিশন সফল হয়নি, বেট করা যাবে না।", chat_id)
+                             else:
+                                 # standalone bet button
+                                 show_pending_bets(chat_id)
+                             continue
+                         if data == "betpvp":
+                             if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
+                                 session = submission_sessions[chat_id]
+                                 sub_id = process_submission_heavy(
+                                     session["usernames"], session["passwords"], session["twofa_list"],
+                                     user_info[chat_id], chat_id, session["type"]
+                                 )
+                                 del submission_sessions[chat_id]
+                                 if sub_id:
+                                     start_bet_session(chat_id, sub_id, "pvp")
+                                 else:
+                                     send_telegram_message("❌ সাবমিশন সফল হয়নি, বেট করা যাবে না।", chat_id)
+                             else:
                                 show_pending_bets(chat_id)
-                            else:
-                                # standalone bet button
-                                show_pending_bets(chat_id)
-                            continue
-                        if data == "betpvp":
-                            if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
-                                session = submission_sessions[chat_id]
-                                threading.Thread(target=process_submission_heavy, args=(
-                                    session["usernames"], session["passwords"], session["twofa_list"],
-                                    user_info[chat_id], chat_id, session["type"]
-                                ), daemon=True).start()
-                                send_telegram_message("✅ সাবমিট প্রসেস হচ্ছে। PvP বেটের জন্য পেন্ডিং সাবমিশন থেকে সিলেক্ট করুন।", chat_id)
-                                del submission_sessions[chat_id]
-                                show_pending_bets(chat_id)
-                            else:
-                                show_pending_bets(chat_id)
-                            continue
+                             continue
                         if data == "betnone":
                             if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
                                 session = submission_sessions[chat_id]

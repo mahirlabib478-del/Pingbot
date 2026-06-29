@@ -854,13 +854,7 @@ def update_user_submission_stats(user_id, acc_type, count):
 
 # ================== BETTING SYSTEM ==================
 def is_bet_window_open():
-    try:
-        now = datetime.datetime.now().time()
-        start = datetime.datetime.strptime(config["bet_window_start"], "%H:%M").time()
-        end = datetime.datetime.strptime(config["bet_window_end"], "%H:%M").time()
-        return start <= now <= end
-    except:
-        return False
+    return True   # বেটিং সবসময় খোলা
 
 def start_bet_session(chat_id, sub_id, bet_type):
     if chat_id in bet_sessions:

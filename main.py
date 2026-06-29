@@ -1888,7 +1888,7 @@ def handle_telegram_commands():
                                  # standalone bet button
                                  show_pending_bets(chat_id)
                              continue
-                         if data == "betpvp":
+                        if data == "betpvp":
                              if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
                                  session = submission_sessions[chat_id]
                                  sub_id = process_submission_heavy(

@@ -951,7 +951,7 @@ def show_pending_bets(chat_id):
         line = f"{sub['id'][:6]} | {sub['username']} | {sub['count']} পিস | {sub['type']}"
         lines.append(line)
         kb_rows.append([{"text": f"🔹 {sub['id'][:6]}", "callback_data": f"betsubmit_{sub['id']}"}])
-    kb_rows.append([{"text": "❌ বাতিল", "callback_data": "cancel_session"}])
+    
     send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
 
 def start_bet_on_submission(chat_id, sub_id):

@@ -2320,7 +2320,11 @@ def broadcast_media(media_type, file_id, caption):
         time.sleep(0.05)
 
 def handle_commands(chat_id, text, chat_type="private", msg=None):
-    global maintenance_mode, game_balances
+    global maintenance_mode, game_balances, subscribed_users, user_info, user_balances
+    global submissions, mother_stock, mother_accounts, config, referrals, referral_bonuses
+    global leaderboard, withdraw_requests, deposit_requests, user_last_request, transactions
+    global submitted_usernames, user_versions, cupgame_sessions, bets
+    
     if text == "/start":
         if chat_type == "private":
             with data_lock:

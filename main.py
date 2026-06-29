@@ -42,8 +42,8 @@ LEADERBOARD_FILE = "leaderboard.json"
 DEPOSITS_FILE = "deposits.json"
 TRANSACTIONS_FILE = "transactions.json"
 DUPLICATE_USERNAMES_FILE = "duplicate_usernames.json"
-RPS_WINS_FILE = "rps_daily_wins.json"
 USER_VERSIONS_FILE = "user_versions.json"
+CUPGAME_SESSIONS_FILE = "cupgame_sessions.json"
 
 app = Flask(__name__)
 
@@ -92,7 +92,6 @@ withdraw_requests = []
 deposit_requests = []
 transactions = []
 submitted_usernames = set()
-rps_daily_wins = {}
 user_versions = {}
 
 # Session trackers
@@ -104,7 +103,7 @@ withdraw_sessions = {}
 deposit_sessions = {}
 support_sessions = set()
 broadcast_sessions = {}
-rps_sessions = {}
+cupgame_sessions = {}
 
 data_lock = threading.RLock()
 backup_lock = threading.Lock()
@@ -155,7 +154,7 @@ def load_all():
     global mother_accounts, user_last_request, subscribed_users, user_info
     global user_balances, game_balances, submissions, config, referrals, referral_bonuses, leaderboard
     global mother_stock, withdraw_requests, deposit_requests, maintenance_mode
-    global transactions, submitted_usernames, rps_daily_wins, user_versions
+    global transactions, submitted_usernames, user_versions, cupgame_sessions
 
     mother_accounts = load_json(MOTHER_FILE, [])
     user_last_request = load_json(COOLDOWN_FILE, {})
@@ -193,8 +192,8 @@ def load_all():
     deposit_requests = load_json(DEPOSITS_FILE, [])
     transactions = load_json(TRANSACTIONS_FILE, [])
     submitted_usernames = set(load_json(DUPLICATE_USERNAMES_FILE, []))
-    rps_daily_wins = load_json(RPS_WINS_FILE, {})
     user_versions = load_json(USER_VERSIONS_FILE, {})
+    cupgame_sessions = load_json(CUPGAME_SESSIONS_FILE, {})
 
 def save_all():
     save_json(MOTHER_FILE, mother_accounts)
@@ -212,8 +211,8 @@ def save_all():
     save_json(DEPOSITS_FILE, deposit_requests)
     save_json(TRANSACTIONS_FILE, transactions)
     save_json(DUPLICATE_USERNAMES_FILE, list(submitted_usernames))
-    save_json(RPS_WINS_FILE, rps_daily_wins)
     save_json(USER_VERSIONS_FILE, user_versions)
+    save_json(CUPGAME_SESSIONS_FILE, cupgame_sessions)
     save_json(CONFIG_FILE, config)
     save_data_to_channel()
 
@@ -341,8 +340,8 @@ def save_data_to_channel():
                     "deposit_requests": deposit_requests, "user_last_request": user_last_request,
                     "transactions": transactions,
                     "submitted_usernames": list(submitted_usernames),
-                    "rps_daily_wins": rps_daily_wins,
                     "user_versions": user_versions,
+                    "cupgame_sessions": cupgame_sessions,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
             json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -424,7 +423,7 @@ def auto_restore_from_channel():
     global subscribed_users, user_info, user_balances, game_balances, submissions
     global mother_stock, mother_accounts, config, referrals, referral_bonuses
     global leaderboard, withdraw_requests, deposit_requests, user_last_request
-    global transactions, submitted_usernames, rps_daily_wins, user_versions
+    global transactions, submitted_usernames, user_versions, cupgame_sessions
 
     if not CHANNEL_ID: return
     try:
@@ -497,8 +496,8 @@ def auto_restore_from_channel():
             user_last_request = data.get("user_last_request", {})
             transactions = data.get("transactions", [])
             submitted_usernames = set(data.get("submitted_usernames", []))
-            rps_daily_wins = data.get("rps_daily_wins", {})
             user_versions = data.get("user_versions", {})
+            cupgame_sessions = data.get("cupgame_sessions", {})
             last_backup_message_id = pinned["message_id"]
         save_all()
         logger.info("Data restored from channel backup successfully")
@@ -515,7 +514,7 @@ def get_main_keyboard(chat_id, chat_type="private"):
         ["💳 ডিপোজিট", "💸 উইথড্র"],
         ["📊 লিডারবোর্ড", "🎁 ফ্রি মাদার একাউন্ট"],
         ["🛒 মাদার একাউন্ট কিনুন", "📞 সাপোর্ট"],
-        ["🎮 RPS গেম"]
+        ["🥤 কাপ গেম"]
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         kb.append(["🛠️ অ্যাডমিন প্যানেল"])
@@ -1498,79 +1497,122 @@ def admin_broadcast_prompt(chat_id):
     }
     send_telegram_message("📢 কী ধরনের ব্রডকাস্ট করবেন?", chat_id, reply_markup=kb)
 
-# ================== RPS GAME ==================
-def start_rps(chat_id):
-    today = str(datetime.date.today())
-    with data_lock:
-        entry = rps_daily_wins.setdefault(chat_id, {"date": today, "wins": 0})
-        if entry.get("date") != today:
-            entry["date"] = today
-            entry["wins"] = 0
-        schedule_save()
-    rps_sessions[chat_id] = True
+# ================== CUP GAME ==================
+def start_cup_game(chat_id):
+    # ফ্রি প্লে – ব্যালেন্স চেক ছাড়াই শুরু
+    cupgame_sessions[chat_id] = {
+        "round": 1,
+        "wins_user": 0,
+        "wins_bot": 0
+    }
+    play_cup_round(chat_id)
+
+def play_cup_round(chat_id):
+    session = cupgame_sessions.get(chat_id)
+    if not session:
+        return
+    round_num = session["round"]
+
+    if round_num > 4:
+        end_cup_game(chat_id)
+        return
+
+    # বট র্যান্ডম কাপ বাছাই করে (কোনো কারচুপি ছাড়া)
+    if round_num in [1, 3]:   # বট লুকায়, ইউজার অনুমান করে
+        hidden = random.randint(1, 3)
+        session["hidden"] = hidden
+        session["type"] = "user_guess"
+        text = f"🥤 রাউন্ড {round_num}/৪\nআমি একটি বোতলের নিচে বল লুকিয়েছি। কোনটি? (1/2/3)"
+    else:                      # ইউজার লুকায়, বট অনুমান করবে
+        session["type"] = "user_hide"
+        text = f"🥤 রাউন্ড {round_num}/৪\nএবার আপনি বল লুকান। একটি বোতল বাছাই করুন (1/2/3)। বাছাইটি গোপন থাকবে।"
+
     kb = {
         "inline_keyboard": [
-            [{"text": "🪨 Rock", "callback_data": "rps_rock"},
-             {"text": "📄 Paper", "callback_data": "rps_paper"},
-             {"text": "✂️ Scissors", "callback_data": "rps_scissors"}],
-            [{"text": "❌ বাতিল", "callback_data": "cancel_session"}]
+            [
+                {"text": "1️⃣", "callback_data": f"cupgame_pick_{round_num}_1"},
+                {"text": "2️⃣", "callback_data": f"cupgame_pick_{round_num}_2"},
+                {"text": "3️⃣", "callback_data": f"cupgame_pick_{round_num}_3"}
+            ],
+            [{"text": "❌ খেলা বাতিল", "callback_data": "cupgame_cancel"}]
         ]
     }
-    send_telegram_message("🎮 Rock Paper Scissors!\nআপনার পছন্দ বাছাই করুন:", chat_id, reply_markup=kb)
+    send_telegram_message(text, chat_id, reply_markup=kb)
 
-def process_rps_callback(chat_id, user_choice):
-    if chat_id not in rps_sessions:
-        return
-    del rps_sessions[chat_id]
-    choices = ["rock", "paper", "scissors"]
-    bot_choice = random.choice(choices)
-    win_map = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
-    if user_choice == bot_choice:
-        result = "draw"
-    elif win_map[user_choice] == bot_choice:
-        result = "win"
-    else:
-        result = "lose"
+def process_cupgame_callback(chat_id, data):
+    if chat_id not in cupgame_sessions:
+        return False
 
-    emoji = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
-    msg = f"আপনি: {emoji[user_choice]}, বট: {emoji[bot_choice]}\n\n"
-    if result == "win":
-        msg += "🎉 আপনি জিতেছেন!"
-        with data_lock:
-            today = str(datetime.date.today())
-            entry = rps_daily_wins.setdefault(chat_id, {"date": today, "wins": 0})
-            if entry.get("date") != today:
-                entry["date"] = today
-                entry["wins"] = 0
-            wins_today = entry["wins"]
-            if wins_today < 3:
-                entry["wins"] = wins_today + 1
-                schedule_save()
-                mother = None
-                for acc in mother_accounts:
-                    if not acc.get("assigned_to"):
-                        mother = acc
-                        break
-                if mother:
-                    mother["assigned_to"] = str(chat_id)
-                    mother["assigned_at"] = time.time()
-                    record_transaction(chat_id, "rps_reward", 0, f"RPS Game: Free mother account {mother['username']}")
-                    reward_text = f"🎁 ফ্রি মাদার একাউন্ট: {mother['username']} / {mother['password']}"
-                    if mother.get("fa_key"):
-                        reward_text += f"\n🔐 2FA: {mother['fa_key']}"
-                else:
-                    game_balances[chat_id] = game_balances.get(chat_id, 0) + 5
-                    record_transaction(chat_id, "rps_reward", 5, "RPS Game: 5 TK (game balance)")
-                    reward_text = "💰 গেম ব্যালেন্সে ৫ টাকা যোগ হয়েছে (শুধু মাদার একাউন্ট কেনার জন্য ব্যবহার করা যাবে)।"
-                msg += f"\n{reward_text}\n(আজকের পুরস্কার {entry['wins']}/3 ব্যবহৃত)"
+    session = cupgame_sessions[chat_id]
+    parts = data.split("_")
+    if parts[1] == "cancel":
+        del cupgame_sessions[chat_id]
+        send_telegram_message("❌ কাপ গেম বাতিল করা হয়েছে।", chat_id,
+                              reply_markup=get_main_keyboard(chat_id, "private"))
+        return True
+
+    if parts[1] == "pick":
+        round_num = int(parts[2])
+        cup = int(parts[3])
+        if round_num != session["round"]:
+            return True  # ignore stale clicks
+
+        if session["type"] == "user_guess":
+            hidden = session["hidden"]
+            if cup == hidden:
+                session["wins_user"] += 1
+                msg = f"✅ সঠিক! বলটি ছিল {hidden} নম্বরে। আপনি এই রাউন্ড জিতেছেন।"
             else:
-                msg += "\nদুঃখিত, আজ পুরস্কার শেষ। তারপরও ভালো খেলেছেন!"
-    elif result == "draw":
-        msg += "🤝 ড্র!"
-    else:
-        msg += "😞 আপনি হেরেছেন। আবার চেষ্টা করুন!"
+                session["wins_bot"] += 1
+                msg = f"❌ ভুল! বলটি ছিল {hidden} নম্বরে। বট এই রাউন্ড জিতল।"
+            send_telegram_message(msg, chat_id)
+            session["round"] += 1
+            play_cup_round(chat_id)
 
-    send_telegram_message(msg, chat_id, reply_markup=get_main_keyboard(chat_id))
+        elif session["type"] == "user_hide":
+            session["user_hide"] = cup
+            bot_guess = random.randint(1, 3)   # complete randomness
+            if bot_guess == cup:
+                session["wins_bot"] += 1
+                msg = f"🤖 বট অনুমান করেছে {bot_guess}। বলটি সেখানেই ছিল! বট রাউন্ড জিতল।"
+            else:
+                session["wins_user"] += 1
+                msg = f"🤖 বট অনুমান করেছে {bot_guess}, কিন্তু বল ছিল {cup} নম্বরে। আপনি রাউন্ড জিতেছেন!"
+            send_telegram_message(msg, chat_id)
+            session["round"] += 1
+            play_cup_round(chat_id)
+
+        return True
+
+    return False
+
+def end_cup_game(chat_id):
+    session = cupgame_sessions.pop(chat_id, None)
+    if not session:
+        return
+
+    user_wins = session["wins_user"]
+    bot_wins = session["wins_bot"]
+
+    # পুরস্কার নির্ধারণ (গেম ব্যালেন্সে যোগ/বিয়োগ)
+    if user_wins > bot_wins:
+        reward = 2.0
+        msg = f"🏆 আপনি ম্যাচ জিতেছেন! ({user_wins}-{bot_wins})\n+{reward} টাকা গেম ব্যালেন্সে যোগ হয়েছে।"
+    elif user_wins == bot_wins:
+        reward = 0.5
+        msg = f"🤝 ম্যাচ ড্র! ({user_wins}-{bot_wins})\n+{reward} টাকা গেম ব্যালেন্সে যোগ হয়েছে।"
+    else:
+        reward = -1.0
+        msg = f"😞 আপনি ম্যাচ হারলেন ({user_wins}-{bot_wins})\n{reward} টাকা গেম ব্যালেন্স থেকে কাটা হয়েছে।"
+
+    with data_lock:
+        # গেম ব্যালেন্স কখনো নেগেটিভ হতে দেব না
+        game_balances[chat_id] = max(0, game_balances.get(chat_id, 0) + reward)
+        record_transaction(chat_id, "cup_game", reward,
+                           f"Cup Game result: {user_wins}-{bot_wins}")
+        schedule_save()
+
+    send_telegram_message(msg, chat_id, reply_markup=get_main_keyboard(chat_id, "private"))
 
 # ================== INLINE MODE ==================
 def handle_inline_query(inline_query):
@@ -1592,12 +1634,12 @@ def handle_inline_query(inline_query):
         results.append({
             "type": "article",
             "id": "2",
-            "title": "RPS গেম খেলুন",
+            "title": "কাপ গেম খেলুন",
             "input_message_content": {
-                "message_text": "🎮 RPS গেম খেলতে চাপুন:"
+                "message_text": "🥤 কাপ গেম খেলতে চাপুন:"
             },
             "reply_markup": {
-                "inline_keyboard": [[{"text": "খেলুন", "url": f"https://t.me/{BOT_USERNAME}?start=rps"}]]
+                "inline_keyboard": [[{"text": "খেলুন", "url": f"https://t.me/{BOT_USERNAME}"}]]
             }
         })
         results.append({
@@ -1639,7 +1681,7 @@ def handle_inline_query(inline_query):
 def handle_telegram_commands():
     global subscribed_users, user_info, user_balances, game_balances, submissions, mother_stock, mother_accounts
     global config, referrals, referral_bonuses, leaderboard, withdraw_requests, deposit_requests, user_last_request
-    global maintenance_mode, last_update_id, transactions, submitted_usernames, rps_daily_wins, user_versions
+    global maintenance_mode, last_update_id, transactions, submitted_usernames, user_versions, cupgame_sessions
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     while True:
@@ -1686,7 +1728,7 @@ def handle_telegram_commands():
                                     is_admin_session = True
                                     break
                             if not cancelled:
-                                for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, rps_sessions]:
+                                for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions, cupgame_sessions]:
                                     if chat_id in sess_dict:
                                         del sess_dict[chat_id]
                                         cancelled = True
@@ -1714,7 +1756,7 @@ def handle_telegram_commands():
                             if user_version != current_version:
                                 for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
                                                   admin_add_mother_session, admin_add_mother_bulk_session,
-                                                  admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                                  admin_approve_sessions, broadcast_sessions, cupgame_sessions]:
                                     sess_dict.pop(chat_id, None)
                                 support_sessions.discard(chat_id)
                                 send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু পেতে /start দিন অথবা নিচের বাটন ব্যবহার করুন।",
@@ -1723,9 +1765,9 @@ def handle_telegram_commands():
                                 schedule_save()
                                 continue
 
-                        # ====== RPS ======
-                        if data.startswith("rps_"):
-                            process_rps_callback(chat_id, data[4:])
+                        # ====== CUP GAME CALLBACKS ======
+                        if data.startswith("cupgame_"):
+                            process_cupgame_callback(chat_id, data)
                             continue
 
                         # ====== OTHER CALLBACKS ======
@@ -1836,7 +1878,7 @@ def handle_telegram_commands():
                             if user_version != current_version:
                                 for sess_dict in [submission_sessions, withdraw_sessions, deposit_sessions,
                                                   admin_add_mother_session, admin_add_mother_bulk_session,
-                                                  admin_approve_sessions, broadcast_sessions, rps_sessions]:
+                                                  admin_approve_sessions, broadcast_sessions, cupgame_sessions]:
                                     sess_dict.pop(chat_id, None)
                                 support_sessions.discard(chat_id)
                                 send_telegram_message("🔄 বট আপডেট হয়েছে! নতুন মেনু ব্যবহার করুন অথবা /start দিন।",
@@ -1966,7 +2008,7 @@ def handle_telegram_commands():
                         elif text == "🎁 ফ্রি মাদার একাউন্ট": handle_get_free_mother(chat_id)
                         elif text == "🛒 মাদার একাউন্ট কিনুন": start_buy_mother(chat_id)
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
-                        elif text == "🎮 RPS গেম": start_rps(chat_id)
+                        elif text == "🥤 কাপ গেম": start_cup_game(chat_id)
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
@@ -2022,8 +2064,8 @@ def handle_telegram_commands():
                                     "deposit_requests": deposit_requests, "user_last_request": user_last_request,
                                     "transactions": transactions,
                                     "submitted_usernames": list(submitted_usernames),
-                                    "rps_daily_wins": rps_daily_wins,
                                     "user_versions": user_versions,
+                                    "cupgame_sessions": cupgame_sessions,
                                     "timestamp": datetime.datetime.now().isoformat()
                                 }
                             json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -2063,8 +2105,8 @@ def handle_telegram_commands():
                                         user_last_request = data.get("user_last_request", {})
                                         transactions = data.get("transactions", [])
                                         submitted_usernames = set(data.get("submitted_usernames", []))
-                                        rps_daily_wins = data.get("rps_daily_wins", {})
                                         user_versions = data.get("user_versions", {})
+                                        cupgame_sessions = data.get("cupgame_sessions", {})
                                         save_all()
                                     send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
                                 except Exception as e:
@@ -2126,7 +2168,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     global subscribed_users, user_info, user_balances, game_balances, submissions
     global mother_stock, mother_accounts, config, referrals, referral_bonuses
     global leaderboard, withdraw_requests, deposit_requests, user_last_request
-    global transactions, submitted_usernames, rps_daily_wins, user_versions
+    global transactions, submitted_usernames, user_versions, cupgame_sessions
 
     parts = text.split()
     cmd = parts[0].lower()
@@ -2369,8 +2411,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 date_str = datetime.datetime.fromtimestamp(t["timestamp"]).strftime("%d/%m/%Y %H:%M")
                 lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
             send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
-    elif cmd == "/rps":
-        start_rps(chat_id)
+    elif cmd == "/cupgame":
+        start_cup_game(chat_id)
     elif cmd == "/send" and chat_id == ADMIN_CHAT_ID:
         # Admin send message to user
         if len(parts) < 3:
@@ -2412,8 +2454,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     user_last_request = data.get("user_last_request", {})
                     transactions = data.get("transactions", [])
                     submitted_usernames = set(data.get("submitted_usernames", []))
-                    rps_daily_wins = data.get("rps_daily_wins", {})
                     user_versions = data.get("user_versions", {})
+                    cupgame_sessions = data.get("cupgame_sessions", {})
                     save_all()
                 send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
             except Exception as e:
@@ -2434,8 +2476,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 "deposit_requests": deposit_requests, "user_last_request": user_last_request,
                 "transactions": transactions,
                 "submitted_usernames": list(submitted_usernames),
-                "rps_daily_wins": rps_daily_wins,
                 "user_versions": user_versions,
+                "cupgame_sessions": cupgame_sessions,
                 "timestamp": datetime.datetime.now().isoformat()
             }
         json_bytes = json.dumps(backup_data, indent=2, ensure_ascii=False).encode('utf-8')

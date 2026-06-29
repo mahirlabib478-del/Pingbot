@@ -2290,8 +2290,8 @@ def handle_telegram_commands():
                             send_telegram_message("বেট সংক্রান্ত সেটিংস:\n"
                                                   "/setbetamounts 10,20,50\n"
                                                   "/setbetmultiplier 85 1.7\n"
-                                                  "/setbetcommission 0.20\n"
-                                                  "/setbetwindow 18:00 20:00", chat_id)
+                                                  "/setbetcommission 0.20", chat_id)
+                                                   
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                         elif text.startswith("/"):

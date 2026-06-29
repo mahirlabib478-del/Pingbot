@@ -882,7 +882,6 @@ def process_bet_percentage(chat_id, percentage):
     kb_rows = []
     for amt in amounts:
         kb_rows.append([{"text": f"{amt} টাকা", "callback_data": f"betamt_{amt}"}])
-    kb_rows.append([{"text": "❌ বাতিল", "callback_data": "cancel_session"}])
     send_telegram_message("💰 কত টাকা বেট করতে চান?", chat_id,
                          reply_markup={"inline_keyboard": kb_rows})
 

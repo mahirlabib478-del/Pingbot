@@ -1859,11 +1859,11 @@ def handle_telegram_commands():
                                 send_telegram_message("❌ প্রক্রিয়া বাতিল করা হয়েছে।", chat_id, reply_markup=keyboard)
                             else:
                                 try:
-                                delete_message(chat_id, cb["message"]["message_id"])
-                            except:
-                                pass
-                            send_telegram_message("❌ বাতিল করা হয়েছে।", chat_id,
-                                                  reply_markup=get_main_keyboard(chat_id, chat_type))
+                                    delete_message(chat_id, cb["message"]["message_id"])
+                                except:
+                                    pass
+                                send_telegram_message("❌ বাতিল করা হয়েছে।", chat_id,
+                                                      reply_markup=get_main_keyboard(chat_id, chat_type))
                             continue
 
                         # Betting callbacks

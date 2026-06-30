@@ -939,21 +939,89 @@ def process_bet_amount(chat_id, amount):
     del bet_sessions[chat_id]
     send_telegram_message("✅ বেট রেকর্ড করা হয়েছে।", chat_id)
 
-def show_pending_bets(chat_id):
-    now = time.time()
+def show_pending_bets(chat_id, page=0, message_id=None):
     with data_lock:
-        pending_subs = [s for s in submissions if s["status"] == "pending" and now - s["timestamp"] < 7200]
+        # কোনো সময়সীমা নেই – সব pending সাবমিশন
+        pending_subs = [s for s in submissions if s["status"] == "pending"]
     if not pending_subs:
         send_telegram_message("এই মুহূর্তে বেট করার মত কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
         return
-    lines = ["🎲 পেন্ডিং সাবমিশন (বেট করতে সিলেক্ট করুন):\n"]
+
+    items_per_page = 10
+    total_pages = (len(pending_subs) + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+    start = page * items_per_page
+    end = start + items_per_page
+    page_items = pending_subs[start:end]
+
+    lines = [f"🎲 পেন্ডিং সাবমিশন (পৃষ্ঠা {page+1}/{total_pages}):\n"]
     kb_rows = []
-    for sub in pending_subs[:10]:
+    for sub in page_items:
         line = f"{sub['id'][:6]} | {sub['username']} | {sub['count']} পিস | {sub['type']}"
         lines.append(line)
         kb_rows.append([{"text": f"🔹 {sub['id'][:6]}", "callback_data": f"betsubmit_{sub['id']}"}])
-    
-    send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"pendingbets_page_{page-1}"})
+    if page < total_pages - 1:
+        nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"pendingbets_page_{page+1}"})
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+    kb_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "cancel_pendingbets"}])
+
+    if message_id:
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": kb_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
+
+def show_pending_submissions(chat_id, page=0, message_id=None):
+    with data_lock:
+        pending_subs = [s for s in submissions if s["status"] == "pending"]
+    if not pending_subs:
+        send_telegram_message("কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
+        return
+
+    items_per_page = 5  # প্রতি পৃষ্ঠায় ৫টি, কারণ প্রতিটি সাবমিশনে ৩টি বাটন
+    total_pages = (len(pending_subs) + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+    start = page * items_per_page
+    end = start + items_per_page
+    page_items = pending_subs[start:end]
+
+    lines = [f"📊 পেন্ডিং সাবমিশন (পৃষ্ঠা {page+1}/{total_pages}):\n"]
+    kb_rows = []
+    for s in page_items:
+        line = f"🆔 {s['id'][:6]} | {s['username']} | {s['count']} পিস | {s['type']}"
+        lines.append(line)
+        kb_rows.append([
+            {"text": "📄 ফাইল", "callback_data": f"getfile_{s['id']}"},
+            {"text": "✅ অ্যাপ্রুভ", "callback_data": f"approve_{s['id']}"},
+            {"text": "❌ রিজেক্ট", "callback_data": f"reject_{s['id']}"}
+        ])
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"pendingsubs_page_{page-1}"})
+    if page < total_pages - 1:
+        nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"pendingsubs_page_{page+1}"})
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+    kb_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_pendingsubs"}])
+
+    if message_id:
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": kb_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
 
 def start_bet_on_submission(chat_id, sub_id):
     if not is_bet_window_open():
@@ -1876,21 +1944,18 @@ def handle_telegram_commands():
                             process_bet_amount(chat_id, amt)
                             continue
                         if data == "betbot":
-                        # from submission flow
                              if chat_id in submission_sessions and submission_sessions[chat_id].get("step") == "bet_decision":
                                  session = submission_sessions[chat_id]
-                                 # সাবমিট সিঙ্ক্রোনাসলি সম্পন্ন করি
                                  sub_id = process_submission_heavy(
                                      session["usernames"], session["passwords"], session["twofa_list"],
                                      user_info[chat_id], chat_id, session["type"]
                                  )
-                                 del submission_sessions[chat_id]  # clear session
+                                 del submission_sessions[chat_id]
                                  if sub_id:
                                      start_bet_session(chat_id, sub_id, "bot")
                                  else:
                                      send_telegram_message("❌ সাবমিশন সফল হয়নি, বেট করা যাবে না।", chat_id)
                              else:
-                                 # standalone bet button
                                  show_pending_bets(chat_id)
                              continue
                         if data == "betpvp":
@@ -1930,8 +1995,21 @@ def handle_telegram_commands():
                             sub_id = data[len("bettype_pvp_"):]
                             start_bet_session(chat_id, sub_id, "pvp")
                             continue
+                        if data.startswith("pendingbets_page_"):
+                            page = int(data.split("_")[2])
+                            message_id = cb["message"]["message_id"]
+                            show_pending_bets(chat_id, page=page, message_id=message_id)
+                            continue
+                        if data == "cancel_pendingbets":
+                            try:
+                                delete_message(chat_id, cb["message"]["message_id"])
+                            except:
+                                pass
+                            send_telegram_message("✅ পেন্ডিং বেট তালিকা বন্ধ করা হয়েছে।", chat_id,
+                                                  reply_markup=get_main_keyboard(chat_id, chat_type))
+                            continue
 
-                        # other callbacks (unchanged)
+                        # other callbacks
                         if data == "sub_cookies":
                             start_submission(chat_id, "cookies") if not config.get("lock_cookies") else send_telegram_message("🔒 বন্ধ", chat_id)
                         elif data == "sub_2fa":
@@ -2022,7 +2100,17 @@ def handle_telegram_commands():
                                     lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
                                 send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
                         elif data.startswith("cupgame_"):
-                            process_cupgame_callback(chat_id, data)       
+                            process_cupgame_callback(chat_id, data)
+                        elif data.startswith("pendingsubs_page_") and chat_id == ADMIN_CHAT_ID:
+                            page = int(data.split("_")[2])
+                            message_id = cb["message"]["message_id"]
+                            show_pending_submissions(chat_id, page=page, message_id=message_id)
+                        elif data == "close_pendingsubs" and chat_id == ADMIN_CHAT_ID:
+                            try:
+                                delete_message(chat_id, cb["message"]["message_id"])
+                            except:
+                                pass
+                            send_telegram_message("📊 সাবমিশন তালিকা বন্ধ করা হয়েছে।", chat_id, reply_markup=admin_panel_keyboard())
                         continue
 
                     if "message" in update:
@@ -2169,16 +2257,7 @@ def handle_telegram_commands():
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:
-                            pending = [s for s in submissions if s["status"]=="pending"]
-                            if not pending:
-                                send_telegram_message("কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
-                            else:
-                                for s in pending:
-                                    buttons = [[{"text": "📄 ফাইল দেখুন", "callback_data": f"getfile_{s['id']}"}],
-                                               [{"text": "✅ অ্যাপ্রুভ", "callback_data": f"approve_{s['id']}"}],
-                                               [{"text": "❌ রিজেক্ট", "callback_data": f"reject_{s['id']}"}]]
-                                    send_telegram_message(f"📥 {s['id']} | {s['username']} | {s['count']} পিস",
-                                                         chat_id, reply_markup={"inline_keyboard": buttons})
+                            show_pending_submissions(chat_id)
                         elif text == "⚙️ মূল্য নির্ধারণ" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("/setprice 2fa <মূল্য>\n/setprice cookies <মূল্য>", chat_id)
                         elif text == "👥 রেফারেল বোনাস %" and chat_id == ADMIN_CHAT_ID:
@@ -2295,7 +2374,6 @@ def handle_telegram_commands():
                                                   "/setbetamounts 10,20,50\n"
                                                   "/setbetmultiplier 85 1.7\n"
                                                   "/setbetcommission 0.20", chat_id)
-                                                   
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                         elif text.startswith("/"):

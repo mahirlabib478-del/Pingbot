@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (ENV VARS) ==================
-BOT_TOKEN = "8808046131:AAHfjC-NesnTcfXw7uQWhmXnCSg38ZQcwRY"   # Replace with env var ideally
+BOT_TOKEN = "8808046131:AAHfjC-NesnTcfXw7uQWhmXnCSg38ZQcwRY"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
 BOT_USERNAME = "Ping478bot"
@@ -90,7 +90,9 @@ config = {
     "bet_multipliers": {"85": 1.7, "90": 2.0, "95": 2.5},
     "bet_commission": 0.20,
     "bet_window_start": "18:00",
-    "bet_window_end": "20:00"
+    "bet_window_end": "20:00",
+    "bot_bet_enabled": True,
+    "pvp_bet_enabled": True
 }
 referrals = {}
 referral_bonuses = {}
@@ -193,7 +195,9 @@ def load_all():
         "bet_multipliers": {"85": 1.7, "90": 2.0, "95": 2.5},
         "bet_commission": 0.20,
         "bet_window_start": "18:00",
-        "bet_window_end": "20:00"
+        "bet_window_end": "20:00",
+        "bot_bet_enabled": True,
+        "pvp_bet_enabled": True
     }
     loaded_config = load_json(CONFIG_FILE, default_config)
     for k in default_config:
@@ -213,7 +217,7 @@ def load_all():
     user_versions = load_json(USER_VERSIONS_FILE, {})
     cupgame_sessions = load_json(CUPGAME_SESSIONS_FILE, {})
     bets = load_json(BETS_FILE, [])
-    bet_match_queue = {}  # rebuilt from unresolved PvP if needed
+    bet_match_queue = {}
 
 def save_all():
     save_json(MOTHER_FILE, mother_accounts)
@@ -525,7 +529,8 @@ def admin_panel_keyboard():
             ["📁 ব্যাকআপ", "📥 রিস্টোর"],
             ["📥 ডিপোজিট রিকোয়েস্ট", "💳 উইথড্র রিকোয়েস্ট"],
             ["💳 বিকাশ নম্বর সেট", "💳 নগদ নম্বর সেট"],
-            ["🎲 বেট সেটিংস", "🔙 মূল মেনু"]
+            ["🎲 বেট সেটিংস", "🎲 বেট অন/অফ"],
+            ["🔙 মূল মেনু"]
         ],
         "resize_keyboard": True
     }
@@ -782,7 +787,6 @@ def process_submission_step(chat_id, text, sender_username):
             for u in session["usernames"]:
                 submitted_usernames.add(u)
             schedule_save()
-        # Instead of immediately submitting, ask for bet
         submission_sessions[chat_id] = {
             "usernames": session["usernames"],
             "passwords": session["passwords"],
@@ -856,11 +860,17 @@ def update_user_submission_stats(user_id, acc_type, count):
 
 # ================== BETTING SYSTEM ==================
 def is_bet_window_open():
-    return True   # বেটিং সবসময় খোলা
+    return True
 
 def start_bet_session(chat_id, sub_id, bet_type):
     if chat_id in bet_sessions:
         send_telegram_message("⚠️ আপনার একটি বেট সেশন চলছে।", chat_id)
+        return
+    if bet_type == "bot" and not config.get("bot_bet_enabled", True):
+        send_telegram_message("❌ বট বেট এখন বন্ধ আছে।", chat_id)
+        return
+    if bet_type == "pvp" and not config.get("pvp_bet_enabled", True):
+        send_telegram_message("❌ PvP বেট এখন বন্ধ আছে।", chat_id)
         return
     bet_sessions[chat_id] = {
         "sub_id": sub_id,
@@ -949,13 +959,14 @@ def get_submission_bet_stats(sub_id):
 def show_pending_bets(chat_id, page=0, message_id=None, filter_type=None):
     with data_lock:
         pending_subs = [s for s in submissions if s["status"] == "pending"]
-    if filter_type:
+    if filter_type == "mine":
+        pending_subs = [s for s in pending_subs if s["user_id"] == chat_id]
+    elif filter_type:
         pending_subs = [s for s in pending_subs if s["type"] == filter_type]
     if not pending_subs:
         send_telegram_message("এই মুহূর্তে বেট করার মত কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
         return
 
-    # ট্রেন্ডিং (মোট বেট) অনুযায়ী সর্ট
     def sort_key(sub):
         _, pot = get_submission_bet_stats(sub["id"])
         return (-pot, sub["timestamp"])
@@ -969,20 +980,21 @@ def show_pending_bets(chat_id, page=0, message_id=None, filter_type=None):
     page_items = pending_subs[start:end]
 
     header = f"🎲 **পেন্ডিং সাবমিশন** (পাতা {page+1}/{total_pages})"
-    if filter_type:
+    if filter_type == "mine":
+        header += "\n👤 আমার সাবমিশন"
+    elif filter_type:
         header += f"\nফিল্টার: {'🍪 কুকিজ' if filter_type=='cookies' else '🔐 2FA'}"
     else:
         header += "\n🔥 ট্রেন্ডিং"
 
     kb_rows = []
-    # ফিল্টার বাটন
     filter_buttons = []
     filter_buttons.append({"text": "🔥 ট্রেন্ডিং" + ("" if not filter_type else ""), "callback_data": "betfilter_trending"})
     filter_buttons.append({"text": "🍪 কুকিজ" + (" ✅" if filter_type == "cookies" else ""), "callback_data": "betfilter_cookies"})
     filter_buttons.append({"text": "🔐 2FA" + (" ✅" if filter_type == "2fa" else ""), "callback_data": "betfilter_2fa"})
+    filter_buttons.append({"text": "👤 আমার" + (" ✅" if filter_type == "mine" else ""), "callback_data": "betfilter_mine"})
     kb_rows.append(filter_buttons)
 
-    # প্রতিটি সাবমিশন একটি করে তথ্যবহুল বাটন
     for sub in page_items:
         sub_id_short = sub["id"][:6]
         type_emoji = "🍪" if sub["type"] == "cookies" else "🔐"
@@ -1001,7 +1013,8 @@ def show_pending_bets(chat_id, page=0, message_id=None, filter_type=None):
         )
         kb_rows.append([{"text": btn_text, "callback_data": f"betcard_{sub['id']}"}])
 
-    # পেজিনেশন
+    kb_rows.append([{"text": "📋 আমার বেট", "callback_data": "mybets"}])
+
     nav_buttons = []
     if page > 0:
         nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"betpage_{page-1}_{filter_type or 'all'}"})
@@ -1022,6 +1035,82 @@ def show_pending_bets(chat_id, page=0, message_id=None, filter_type=None):
         send_telegram_message(header, chat_id,
                               reply_markup={"inline_keyboard": kb_rows}, parse_mode="Markdown")
 
+def show_my_bets(chat_id, page=0, message_id=None):
+    with data_lock:
+        my_bets = [b for b in bets if b["user_id"] == chat_id and b["status"] == "pending"]
+    if not my_bets:
+        send_telegram_message("আপনার কোনো পেন্ডিং বেট নেই।", chat_id)
+        return
+
+    items_per_page = 5
+    total_pages = (len(my_bets) + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+    start = page * items_per_page
+    end = start + items_per_page
+    page_items = my_bets[start:end]
+
+    lines = [f"📋 **আমার পেন্ডিং বেট** (পাতা {page+1}/{total_pages}):\n"]
+    kb_rows = []
+    for bet in page_items:
+        sub = next((s for s in submissions if s["id"] == bet["submission_id"]), None)
+        sub_info = ""
+        if sub:
+            sub_info = f"Sub: {sub['id'][:6]} ({sub['type']})"
+        else:
+            sub_info = f"Sub: {bet['submission_id'][:6]}"
+        bet_type_str = "🤖 বট" if bet["bet_type"] == "bot" else "👥 PvP"
+        line = f"{bet_type_str} | {sub_info} | {bet['amount']} TK | {bet['percentage']}%"
+        lines.append(line)
+        # Optionally add a cancel bet button if needed, but not requested; just show.
+        kb_rows.append([{"text": f"🔹 {bet['id'][:6]}", "callback_data": f"noop"}])
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"mybets_page_{page-1}"})
+    if page < total_pages - 1:
+        nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"mybets_page_{page+1}"})
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+    kb_rows.append([{"text": "🔙 ফিরুন", "callback_data": "cancel_mybets"}])
+
+    if message_id:
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": kb_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
+
+def admin_bet_toggle_menu(chat_id, message_id=None):
+    bot_en = config.get("bot_bet_enabled", True)
+    pvp_en = config.get("pvp_bet_enabled", True)
+    text = "🎲 বেটিং কন্ট্রোল প্যানেল\n"
+    text += f"🤖 বট বেট: {'✅ চালু' if bot_en else '❌ বন্ধ'}\n"
+    text += f"👥 PvP বেট: {'✅ চালু' if pvp_en else '❌ বন্ধ'}"
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"🤖 বট বেট {'✅' if bot_en else '❌'}", "callback_data": "togglebet_bot"},
+                {"text": f"👥 PvP বেট {'✅' if pvp_en else '❌'}", "callback_data": "togglebet_pvp"}
+            ],
+            [
+                {"text": "🔁 সব চালু", "callback_data": "togglebet_all_on"},
+                {"text": "🔁 সব বন্ধ", "callback_data": "togglebet_all_off"}
+            ],
+            [
+                {"text": "🔙 ফিরুন", "callback_data": "admin_back"}
+            ]
+        ]
+    }
+    if message_id:
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id,
+            "text": text, "reply_markup": kb
+        })
+    else:
+        send_telegram_message(text, chat_id, reply_markup=kb)
+
 def show_pending_submissions(chat_id, page=0, message_id=None):
     with data_lock:
         pending_subs = [s for s in submissions if s["status"] == "pending"]
@@ -1029,7 +1118,7 @@ def show_pending_submissions(chat_id, page=0, message_id=None):
         send_telegram_message("কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
         return
 
-    items_per_page = 5  # প্রতি পৃষ্ঠায় ৫টি, কারণ প্রতিটি সাবমিশনে ৩টি বাটন
+    items_per_page = 5
     total_pages = (len(pending_subs) + items_per_page - 1) // items_per_page
     page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
     start = page * items_per_page
@@ -1121,7 +1210,7 @@ def resolve_bets_for_submission(sub_id, ok_count, total_count):
                     winner = bet
                 elif opp_bet["percentage"] > bet["percentage"]:
                     winner = opp_bet
-                if winner is None:  # Tie
+                if winner is None:
                     user_balances[bet["user_id"]] += bet["amount"]
                     user_balances[opp_bet["user_id"]] += opp_bet["amount"]
                     record_transaction(bet["user_id"], "bet_tie", bet["amount"], f"Bet tied on {sub_id}")
@@ -1142,7 +1231,7 @@ def resolve_bets_for_submission(sub_id, ok_count, total_count):
                 opp_bet["status"] = "resolved"
         schedule_save()
 
-# ================== ADMIN APPROVAL (modified) ==================
+# ================== ADMIN APPROVAL (unchanged) ==================
 def admin_approve_start(sub_id):
     if ADMIN_CHAT_ID in admin_approve_sessions:
         send_telegram_message("⚠️ আগের অ্যাপ্রুভ প্রক্রিয়া শেষ করুন বা বাতিল করুন।", ADMIN_CHAT_ID)
@@ -1935,7 +2024,52 @@ def handle_telegram_commands():
                         chat_type = cb["message"]["chat"]["type"]
                         answer_callback_query(cb["id"])
 
-                        # ===== New betting page callbacks =====
+                        # Admin bet toggle callbacks
+                        if data.startswith("togglebet_"):
+                            if chat_id != ADMIN_CHAT_ID:
+                                continue
+                            action = data[len("togglebet_"):]
+                            if action == "bot":
+                                config["bot_bet_enabled"] = not config.get("bot_bet_enabled", True)
+                                save_all()
+                                admin_bet_toggle_menu(chat_id, cb["message"]["message_id"])
+                            elif action == "pvp":
+                                config["pvp_bet_enabled"] = not config.get("pvp_bet_enabled", True)
+                                save_all()
+                                admin_bet_toggle_menu(chat_id, cb["message"]["message_id"])
+                            elif action == "all_on":
+                                config["bot_bet_enabled"] = True
+                                config["pvp_bet_enabled"] = True
+                                save_all()
+                                admin_bet_toggle_menu(chat_id, cb["message"]["message_id"])
+                            elif action == "all_off":
+                                config["bot_bet_enabled"] = False
+                                config["pvp_bet_enabled"] = False
+                                save_all()
+                                admin_bet_toggle_menu(chat_id, cb["message"]["message_id"])
+                            continue
+                        if data == "admin_back":
+                            if chat_id == ADMIN_CHAT_ID:
+                                send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
+                            continue
+
+                        # My bets callbacks
+                        if data == "mybets":
+                            show_my_bets(chat_id)
+                            continue
+                        if data.startswith("mybets_page_"):
+                            page = int(data.split("_")[2])
+                            show_my_bets(chat_id, page=page, message_id=cb["message"]["message_id"])
+                            continue
+                        if data == "cancel_mybets":
+                            try:
+                                delete_message(chat_id, cb["message"]["message_id"])
+                            except:
+                                pass
+                            show_pending_bets(chat_id)  # go back to betting page
+                            continue
+
+                        # Original betting page callbacks
                         if data.startswith("betcard_"):
                             sub_id = data[len("betcard_"):]
                             start_bet_on_submission(chat_id, sub_id)
@@ -1948,6 +2082,8 @@ def handle_telegram_commands():
                                 filter_type = "cookies"
                             elif filt == "2fa":
                                 filter_type = "2fa"
+                            elif filt == "mine":
+                                filter_type = "mine"
                             else:
                                 filter_type = None
                             show_pending_bets(chat_id, page=0, message_id=cb["message"]["message_id"], filter_type=filter_type)
@@ -1956,10 +2092,14 @@ def handle_telegram_commands():
                             parts = data.split("_")
                             page = int(parts[1])
                             filt_raw = parts[2] if len(parts) > 2 else "all"
-                            filter_type = None if filt_raw == "all" else filt_raw
+                            if filt_raw == "mine":
+                                filter_type = "mine"
+                            elif filt_raw == "all":
+                                filter_type = None
+                            else:
+                                filter_type = filt_raw
                             show_pending_bets(chat_id, page=page, message_id=cb["message"]["message_id"], filter_type=filter_type)
                             continue
-                        # ===== end of new callbacks =====
 
                         if data == "cancel_broadcast" and chat_id == ADMIN_CHAT_ID:
                             if ADMIN_CHAT_ID in broadcast_sessions:
@@ -2003,7 +2143,7 @@ def handle_telegram_commands():
                                                       reply_markup=get_main_keyboard(chat_id, chat_type))
                             continue
 
-                        # Betting callbacks (original)
+                        # Betting callbacks
                         if data.startswith("betperc_"):
                             perc = data.split("_")[1]
                             process_bet_percentage(chat_id, perc)
@@ -2443,6 +2583,8 @@ def handle_telegram_commands():
                                                   "/setbetamounts 10,20,50\n"
                                                   "/setbetmultiplier 85 1.7\n"
                                                   "/setbetcommission 0.20", chat_id)
+                        elif text == "🎲 বেট অন/অফ" and chat_id == ADMIN_CHAT_ID:
+                            admin_bet_toggle_menu(chat_id)
                         elif text == "🔙 মূল মেনু":
                             send_telegram_message("মূল মেনু", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
                         elif text.startswith("/"):
@@ -2471,7 +2613,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     global submissions, mother_stock, mother_accounts, config, referrals, referral_bonuses
     global leaderboard, withdraw_requests, deposit_requests, user_last_request, transactions
     global submitted_usernames, user_versions, cupgame_sessions, bets
-    
+
     if text == "/start":
         if chat_type == "private":
             with data_lock:
@@ -2498,6 +2640,33 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🔧 রক্ষণাবেক্ষণ মোড {'চালু' if maintenance_mode else 'বন্ধ'}।", chat_id)
         else:
             send_telegram_message(f"🔧 বর্তমান অবস্থা: {'চালু' if maintenance_mode else 'বন্ধ'}। /maintenance on/off", chat_id)
+    elif text.startswith("/togglebet") and chat_id == ADMIN_CHAT_ID:
+        parts = text.split()
+        if len(parts) < 2:
+            send_telegram_message("ব্যবহার: /togglebet <bot|pvp|all|status>", chat_id)
+            return
+        arg = parts[1].lower()
+        if arg == "bot":
+            config["bot_bet_enabled"] = not config.get("bot_bet_enabled", True)
+            save_all()
+            send_telegram_message(f"বট বেট এখন {'✅ চালু' if config['bot_bet_enabled'] else '❌ বন্ধ'}।", chat_id)
+        elif arg == "pvp":
+            config["pvp_bet_enabled"] = not config.get("pvp_bet_enabled", True)
+            save_all()
+            send_telegram_message(f"PvP বেট এখন {'✅ চালু' if config['pvp_bet_enabled'] else '❌ বন্ধ'}।", chat_id)
+        elif arg == "all":
+            current = config.get("bot_bet_enabled", True) and config.get("pvp_bet_enabled", True)
+            new_state = not current
+            config["bot_bet_enabled"] = new_state
+            config["pvp_bet_enabled"] = new_state
+            save_all()
+            send_telegram_message(f"সব বেট এখন {'✅ চালু' if new_state else '❌ বন্ধ'}।", chat_id)
+        elif arg == "status":
+            bot = "✅ চালু" if config.get("bot_bet_enabled", True) else "❌ বন্ধ"
+            pvp = "✅ চালু" if config.get("pvp_bet_enabled", True) else "❌ বন্ধ"
+            send_telegram_message(f"🤖 বট বেট: {bot}\n👥 PvP বেট: {pvp}", chat_id)
+        else:
+            send_telegram_message("সঠিক অপশন: bot, pvp, all, status", chat_id)
     elif text.startswith("/setprice") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         try:

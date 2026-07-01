@@ -1050,7 +1050,6 @@ def show_my_bets(chat_id, page=0, message_id=None):
     page_items = my_bets[start:end]
 
     lines = [f"📋 **আমার পেন্ডিং বেট** (পাতা {page+1}/{total_pages}):\n"]
-    kb_rows = []
     for bet in page_items:
         sub = next((s for s in submissions if s["id"] == bet["submission_id"]), None)
         sub_info = ""
@@ -1061,8 +1060,8 @@ def show_my_bets(chat_id, page=0, message_id=None):
         bet_type_str = "🤖 বট" if bet["bet_type"] == "bot" else "👥 PvP"
         line = f"{bet_type_str} | {sub_info} | {bet['amount']} TK | {bet['percentage']}%"
         lines.append(line)
-        # Optionally add a cancel bet button if needed, but not requested; just show.
-        kb_rows.append([{"text": f"🔹 {bet['id'][:6]}", "callback_data": f"noop"}])
+
+    kb_rows = []
 
     nav_buttons = []
     if page > 0:
@@ -1081,7 +1080,7 @@ def show_my_bets(chat_id, page=0, message_id=None):
         })
     else:
         send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
-
+        
 def admin_bet_toggle_menu(chat_id, message_id=None):
     bot_en = config.get("bot_bet_enabled", True)
     pvp_en = config.get("pvp_bet_enabled", True)

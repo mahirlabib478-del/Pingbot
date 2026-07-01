@@ -512,7 +512,8 @@ def get_main_keyboard(chat_id, chat_type="private"):
         ["💳 ডিপোজিট", "💸 উইথড্র"],
         ["📊 লিডারবোর্ড", "🎁 ফ্রি মাদার একাউন্ট"],
         ["🛒 মাদার একাউন্ট কিনুন", "📞 সাপোর্ট"],
-        ["🥤 কাপ গেম", "🎲 বেট করুন"]
+        ["🥤 কাপ গেম", "🎲 বেট করুন"],
+        ["📋 আমার পেন্ডিং"]
     ]
     if str(chat_id) == ADMIN_CHAT_ID:
         kb.append(["🛠️ অ্যাডমিন প্যানেল"])
@@ -1153,7 +1154,53 @@ def show_pending_submissions(chat_id, page=0, message_id=None):
         })
     else:
         send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
+        
+def show_my_pending_submissions(chat_id, page=0, message_id=None):
+    with data_lock:
+        my_subs = [s for s in submissions if s["status"] == "pending" and s["user_id"] == chat_id]
+    if not my_subs:
+        send_telegram_message("আপনার কোনো পেন্ডিং সাবমিশন নেই।", chat_id)
+        return
 
+    items_per_page = 5
+    total_pages = (len(my_subs) + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages-1)) if total_pages > 0 else 0
+    start = page * items_per_page
+    end = start + items_per_page
+    page_items = my_subs[start:end]
+
+    lines = [f"📂 আমার পেন্ডিং সাবমিশন (পাতা {page+1}/{total_pages}):\n"]
+    for s in page_items:
+        type_emoji = "🍪" if s["type"] == "cookies" else "🔐"
+        seconds_ago = time.time() - s["timestamp"]
+        if seconds_ago < 60:
+            ago_str = "এইমাত্র"
+        elif seconds_ago < 3600:
+            ago_str = f"{int(seconds_ago//60)} মিনিট আগে"
+        else:
+            ago_str = f"{int(seconds_ago//3600)} ঘন্টা আগে"
+        line = f"{type_emoji} {s['type'].upper()} | 🆔 {s['id'][:6]} | 📦 {s['count']}pcs | 🕒 {ago_str}"
+        lines.append(line)
+
+    kb_rows = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ পূর্ববর্তী", "callback_data": f"mypendingsubs_page_{page-1}"})
+    if page < total_pages - 1:
+        nav_buttons.append({"text": "➡️ পরবর্তী", "callback_data": f"mypendingsubs_page_{page+1}"})
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+    kb_rows.append([{"text": "🔙 বন্ধ করুন", "callback_data": "close_mypendingsubs"}])
+
+    if message_id:
+        get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id,
+            "text": "\n".join(lines),
+            "reply_markup": {"inline_keyboard": kb_rows}
+        })
+    else:
+        send_telegram_message("\n".join(lines), chat_id, reply_markup={"inline_keyboard": kb_rows})
+        
 def start_bet_on_submission(chat_id, sub_id):
     if not is_bet_window_open():
         send_telegram_message(f"⏳ বেট উইন্ডো ({config['bet_window_start']} - {config['bet_window_end']}) এর বাইরে আপনি বেট করতে পারবেন না।", chat_id)
@@ -2216,7 +2263,21 @@ def handle_telegram_commands():
                             send_telegram_message("✅ পেন্ডিং বেট তালিকা বন্ধ করা হয়েছে।", chat_id,
                                                   reply_markup=get_main_keyboard(chat_id, chat_type))
                             continue
+                    
 
+                        if data.startswith("mypendingsubs_page_"):
+                            page = int(data.split("_")[2])
+                            message_id = cb["message"]["message_id"]
+                            show_my_pending_submissions(chat_id, page=page, message_id=message_id)
+                            continue
+                        if data == "close_mypendingsubs":
+                            try:
+                                delete_message(chat_id, cb["message"]["message_id"])
+                            except:
+                                pass
+                            send_telegram_message("✅ আপনার পেন্ডিং সাবমিশন তালিকা বন্ধ করা হয়েছে।", chat_id,
+                                                  reply_markup=get_main_keyboard(chat_id, chat_type))
+                            continue
                         # other callbacks
                         if data == "sub_cookies":
                             start_submission(chat_id, "cookies") if not config.get("lock_cookies") else send_telegram_message("🔒 বন্ধ", chat_id)
@@ -2462,6 +2523,7 @@ def handle_telegram_commands():
                         elif text == "📞 সাপোর্ট": start_support(chat_id)
                         elif text == "🥤 কাপ গেম": start_cup_game(chat_id)
                         elif text == "🎲 বেট করুন": show_pending_bets(chat_id)
+                        elif text == "📋 আমার পেন্ডিং": show_my_pending_submissions(chat_id)    
                         elif text == "🛠️ অ্যাডমিন প্যানেল" and chat_id == ADMIN_CHAT_ID:
                             send_telegram_message("অ্যাডমিন প্যানেল", chat_id, reply_markup=admin_panel_keyboard())
                         elif text == "📊 সাবমিটেড ফাইল" and chat_id == ADMIN_CHAT_ID:

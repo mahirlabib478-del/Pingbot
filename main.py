@@ -92,7 +92,8 @@ config = {
     "bet_window_start": "18:00",
     "bet_window_end": "20:00",
     "bot_bet_enabled": True,
-    "pvp_bet_enabled": True
+    "pvp_bet_enabled": True,
+    "bet_history_days": 7
 }
 referrals = {}
 referral_bonuses = {}
@@ -197,7 +198,8 @@ def load_all():
         "bet_window_start": "18:00",
         "bet_window_end": "20:00",
         "bot_bet_enabled": True,
-        "pvp_bet_enabled": True
+        "pvp_bet_enabled": True,
+        "bet_history_days": 7
     }
     loaded_config = load_json(CONFIG_FILE, default_config)
     for k in default_config:
@@ -3118,7 +3120,26 @@ def daily_clean():
         with data_lock:
             submissions[:] = [s for s in submissions if time.time() - s["timestamp"] < 172800]
             save_all()
-
+            
+def clean_old_bets():
+    while True:
+        time.sleep(86400)  # প্রতি ২৪ ঘণ্টায় একবার চেক
+        try:
+            days = int(config.get("bet_history_days", 7))
+            if days <= 0:
+                days = 7
+            cutoff = time.time() - days * 86400
+            with data_lock:
+                global bets
+                before = len(bets)
+                bets = [b for b in bets if not (b.get("status") == "resolved" and b.get("timestamp", 0) < cutoff)]
+                after = len(bets)
+                if before != after:
+                    save_all()
+                    logger.info(f"Cleaned {before - after} old resolved bets")
+        except Exception as e:
+            logger.error(f"clean_old_bets error: {e}")
+            
 # ================== FLASK ==================
 @app.route("/")
 def home():
@@ -3144,5 +3165,6 @@ if __name__ == "__main__":
     threading.Thread(target=duplicate_cleanup_loop, daemon=True).start()
     threading.Thread(target=user_versions_cleanup_loop, daemon=True).start()
     threading.Thread(target=handle_telegram_commands, daemon=True).start()
+    threading.Thread(target=clean_old_bets, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, threaded=True)

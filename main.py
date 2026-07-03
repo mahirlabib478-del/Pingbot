@@ -3153,7 +3153,6 @@ if __name__ == "__main__":
         get_bot_session().post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except: pass
     threading.Thread(target=auto_backup_loop, daemon=True).start()
-    threading.Thread(target=daily_clean, daemon=True).start()
     threading.Thread(target=daily_task_loop, daemon=True).start()
     threading.Thread(target=duplicate_cleanup_loop, daemon=True).start()
     threading.Thread(target=user_versions_cleanup_loop, daemon=True).start()

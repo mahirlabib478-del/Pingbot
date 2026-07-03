@@ -3113,13 +3113,6 @@ def user_versions_cleanup_loop():
                 del user_versions[uid]
             save_all()
         logger.info(f"Cleaned {len(inactive)} old user_versions entries")
-
-def daily_clean():
-    while True:
-        time.sleep(86400)
-        with data_lock:
-            submissions[:] = [s for s in submissions if time.time() - s["timestamp"] < 172800]
-            save_all()
             
 def clean_old_bets():
     while True:

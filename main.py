@@ -3024,7 +3024,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
         else:
             send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
-    else:
+      else:
         # আগের মত টেক্সট মেসেজ
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
@@ -3032,6 +3032,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         message_text = " ".join(parts[2:])
         send_telegram_message(message_text, target_user)
         send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
+        
     elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
         if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
             file_id = msg["reply_to_message"]["document"]["file_id"]

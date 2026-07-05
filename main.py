@@ -2981,10 +2981,54 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     elif text == "/cupgame":
         start_cup_game(chat_id)
     elif text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-        parts = text.split()
+    parts = text.split()
+    if len(parts) < 2:
+        send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
+        return
+    target_user = parts[1]
+
+    # যদি রিপ্লাই করা মেসেজে মিডিয়া থাকে
+    if msg and msg.get("reply_to_message"):
+        replied = msg["reply_to_message"]
+        if "photo" in replied:
+            file_id = replied["photo"][-1]["file_id"]
+            caption = replied.get("caption", "")
+            resp = get_bot_session().post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                json={"chat_id": target_user, "photo": file_id, "caption": caption}
+            )
+            if resp.status_code == 200:
+                send_telegram_message(f"✅ {target_user} কে ছবি পাঠানো হয়েছে।", chat_id)
+            else:
+                send_telegram_message(f"❌ ছবি পাঠানো যায়নি।", chat_id)
+        elif "voice" in replied:
+            file_id = replied["voice"]["file_id"]
+            resp = get_bot_session().post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                json={"chat_id": target_user, "voice": file_id}
+            )
+            if resp.status_code == 200:
+                send_telegram_message(f"✅ {target_user} কে ভয়েস পাঠানো হয়েছে।", chat_id)
+            else:
+                send_telegram_message(f"❌ ভয়েস পাঠানো যায়নি।", chat_id)
+        elif "document" in replied:
+            file_id = replied["document"]["file_id"]
+            caption = replied.get("caption", "")
+            resp = get_bot_session().post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                json={"chat_id": target_user, "document": file_id, "caption": caption}
+            )
+            if resp.status_code == 200:
+                send_telegram_message(f"✅ {target_user} কে ফাইল পাঠানো হয়েছে।", chat_id)
+            else:
+                send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
+        else:
+            send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
+    else:
+        # আগের মত টেক্সট মেসেজ
         if len(parts) < 3:
-            send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id); return
-        target_user = parts[1]
+            send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
+            return
         message_text = " ".join(parts[2:])
         send_telegram_message(message_text, target_user)
         send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)

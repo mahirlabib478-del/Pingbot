@@ -2847,7 +2847,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 deleted = mother_accounts.pop(idx)
                 schedule_save()
                 send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
-            else: send_telegram_message("❌ ভুল ইনডেক্স।", chat_id)
+            else: send_telegram_message("❌ ভুল ইনডেক্স।", chat_id) 
     elif text.startswith("/deletemothers") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2:
@@ -2981,7 +2981,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     elif text == "/cupgame":
         start_cup_game(chat_id)
     elif text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-        parts = text.split()
+    parts = text.split()
     if len(parts) < 2:
         send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
         return
@@ -3024,53 +3024,17 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
         else:
             send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
-      else:
-        # আগের মত টেক্সট মেসেজ
+    else:
+        # আগের মতো টেক্সট মেসেজ
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
             return
         message_text = " ".join(parts[2:])
         send_telegram_message(message_text, target_user)
         send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
-        
-    elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
-        if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
-            file_id = msg["reply_to_message"]["document"]["file_id"]
-            try:
-                s = get_bot_session()
-                file_info = s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}").json()
-                file_path = file_info["result"]["file_path"]
-                content = s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}").content
-                decompressed = gzip.decompress(content)
-                data = json.loads(decompressed.decode('utf-8'))
-                with data_lock:
-                    subscribed_users = set(data.get("subscribed_users", []))
-                    user_info = data.get("user_info", {})
-                    user_balances = data.get("user_balances", {})
-                    game_balances = data.get("game_balances", {})
-                    submissions = data.get("submissions", [])
-                    mother_stock = data.get("mother_stock", [])
-                    mother_accounts = data.get("mother_accounts", [])
-                    config = data.get("config", config)
-                    referrals = data.get("referrals", {})
-                    referral_bonuses = data.get("referral_bonuses", {})
-                    leaderboard = data.get("leaderboard", {})
-                    withdraw_requests = data.get("withdraw_requests", [])
-                    deposit_requests = data.get("deposit_requests", [])
-                    user_last_request = data.get("user_last_request", {})
-                    transactions = data.get("transactions", [])
-                    submitted_usernames = set(data.get("submitted_usernames", []))
-                    user_versions = data.get("user_versions", {})
-                    cupgame_sessions = data.get("cupgame_sessions", {})
-                    bets = data.get("bets", [])
-                    save_all()
-                send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
-            except Exception as e:
-                logger.exception("Restore error")
-                send_telegram_message(f"❌ রিস্টোর ব্যর্থ: {e}", ADMIN_CHAT_ID)
-        else:
-            send_telegram_message("❗ দয়া করে একটি `.json.gz` ব্যাকআপ ফাইলে রিপ্লাই দিয়ে `/restore` লিখুন।", ADMIN_CHAT_ID)
-    elif text == "/backup" and chat_id == ADMIN_CHAT_ID:
+
+elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
+    # ... তোমার বাকি কোড ...
         with data_lock:
             backup_data = {
                 "subscribed_users": list(subscribed_users), "user_info": user_info,

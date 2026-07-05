@@ -2671,6 +2671,11 @@ def broadcast_media(media_type, file_id, caption):
             pass
         time.sleep(0.05)
 
+
+             
+                
+        
+                
 def handle_commands(chat_id, text, chat_type="private", msg=None):
     global maintenance_mode, game_balances, subscribed_users, user_info, user_balances
     global submissions, mother_stock, mother_accounts, config, referrals, referral_bonuses
@@ -2694,6 +2699,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     else:
                         send_telegram_message("❌ রেফারার বৈধ ইউজার নন।", chat_id)
         send_telegram_message("✨ স্বাগতম! নিচের বাটন ব্যবহার করুন।", chat_id, reply_markup=get_main_keyboard(chat_id, chat_type))
+
     elif text.startswith("/maintenance") and chat_id == ADMIN_CHAT_ID:
         args = text[len("/maintenance"):].strip().lower()
         if args in ["on","off"]:
@@ -2703,6 +2709,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🔧 রক্ষণাবেক্ষণ মোড {'চালু' if maintenance_mode else 'বন্ধ'}।", chat_id)
         else:
             send_telegram_message(f"🔧 বর্তমান অবস্থা: {'চালু' if maintenance_mode else 'বন্ধ'}। /maintenance on/off", chat_id)
+
     elif text.startswith("/togglebet") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2:
@@ -2730,6 +2737,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"🤖 বট বেট: {bot}\n👥 PvP বেট: {pvp}", chat_id)
         else:
             send_telegram_message("সঠিক অপশন: bot, pvp, all, status", chat_id)
+
     elif text.startswith("/setprice") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         try:
@@ -2741,6 +2749,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"✅ {parts[1]} মূল্য {price} টাকা।", chat_id)
             else: send_telegram_message("টাইপ: 2fa বা cookies", chat_id)
         except: send_telegram_message("/setprice 2fa/cookies <মূল্য>", chat_id)
+
     elif text.startswith("/setmotherprice") and chat_id == ADMIN_CHAT_ID:
         try:
             price = float(text.split()[1])
@@ -2748,6 +2757,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             save_all()
             send_telegram_message(f"✅ মাদার মূল্য {price} টাকা।", chat_id)
         except: send_telegram_message("/setmotherprice <মূল্য>", chat_id)
+
     elif text.startswith("/setreferral") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         try:
@@ -2758,6 +2768,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"✅ রেফারেল {parts[1]} বোনাস {perc}%।", chat_id)
             else: send_telegram_message("level1 or level2", chat_id)
         except: send_telegram_message("/setreferral level1/level2 <শতাংশ>", chat_id)
+
     elif text.startswith("/setbkash") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) > 1:
@@ -2765,6 +2776,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             save_all()
             send_telegram_message(f"✅ বিকাশ নম্বর {parts[1]} সেট করা হয়েছে।", chat_id)
         else: send_telegram_message("/setbkash <নম্বর>", chat_id)
+
     elif text.startswith("/setnagad") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) > 1:
@@ -2772,6 +2784,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             save_all()
             send_telegram_message(f"✅ নগদ নম্বর {parts[1]} সেট করা হয়েছে।", chat_id)
         else: send_telegram_message("/setnagad <নম্বর>", chat_id)
+
     elif text.startswith("/setbetamounts") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) > 1:
@@ -2784,6 +2797,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message("/setbetamounts 10,20,50", chat_id)
         else:
             send_telegram_message("/setbetamounts 10,20,50", chat_id)
+
     elif text.startswith("/setbetmultiplier") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) >= 3:
@@ -2797,6 +2811,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message("/setbetmultiplier 85 1.7", chat_id)
         else:
             send_telegram_message("/setbetmultiplier 85 1.7", chat_id)
+
     elif text.startswith("/setbetcommission") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) > 1:
@@ -2809,6 +2824,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message("/setbetcommission 0.20", chat_id)
         else:
             send_telegram_message("/setbetcommission 0.20", chat_id)
+
     elif text.startswith("/setbetwindow") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) >= 3:
@@ -2818,6 +2834,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             send_telegram_message(f"✅ বেট উইন্ডো: {parts[1]} - {parts[2]}", chat_id)
         else:
             send_telegram_message("/setbetwindow 18:00 20:00", chat_id)
+
     elif text.startswith("/addmother") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 3:
@@ -2831,10 +2848,13 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                                     "assigned_to": None, "assigned_at": None})
             schedule_save()
         send_telegram_message(f"✅ ফ্রি মাদার একাউন্ট যোগ করা হয়েছে: {username}", chat_id)
+
     elif text == "/addmotherbulk" and chat_id == ADMIN_CHAT_ID:
         start_add_mother_bulk(chat_id)
+
     elif text == "/motherlist" and chat_id == ADMIN_CHAT_ID:
         show_free_mother_list(chat_id)
+
     elif text.startswith("/deletemother") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2:
@@ -2847,7 +2867,8 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 deleted = mother_accounts.pop(idx)
                 schedule_save()
                 send_telegram_message(f"🗑️ ফ্রি মাদার একাউন্ট `{deleted['username']}` মুছে ফেলা হয়েছে।", chat_id)
-            else: send_telegram_message("❌ ভুল ইনডেক্স।", chat_id) 
+            else: send_telegram_message("❌ ভুল ইনডেক্স।", chat_id)
+
     elif text.startswith("/deletemothers") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2:
@@ -2864,6 +2885,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             names = ", ".join([d['username'] for d in deleted])
             send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
         else: send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি।", chat_id)
+
     elif text.startswith("/deletemotherstock") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2:
@@ -2880,6 +2902,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             names = ", ".join([d['username'] for d in deleted])
             send_telegram_message(f"🗑️ ডিলিট সম্পন্ন: {names}", chat_id)
         else: send_telegram_message("❌ কোনো বৈধ ইনডেক্স পাওয়া যায়নি।", chat_id)
+
     elif text.startswith("/profile") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2 or not parts[1].isdigit():
@@ -2887,6 +2910,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         target = parts[1]
         msg_text = get_profile_text(target)
         send_telegram_message(msg_text, chat_id)
+
     elif text.startswith("/setbonus") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) > 1:
@@ -2897,6 +2921,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 send_telegram_message(f"✅ টার্গেট বোনাস {bonus}% সেট করা হয়েছে।", chat_id)
             except: send_telegram_message("/setbonus <শতাংশ>", chat_id)
         else: send_telegram_message("/setbonus <শতাংশ>", chat_id)
+
     elif text.startswith("/approvedeposit") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2: send_telegram_message("/approvedeposit <id>", chat_id); return
@@ -2914,6 +2939,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     send_telegram_message(f"✅ আপনার {dep['amount']} টাকার ডিপোজিট অনুমোদিত হয়েছে। বর্তমান ব্যালেন্স: {user_balances[user_id]} টাকা", user_id)
                     break
             else: send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি বা ইতিমধ্যে প্রসেস করা হয়েছে।", ADMIN_CHAT_ID)
+
     elif text.startswith("/rejectdeposit") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2: send_telegram_message("/rejectdeposit <id>", chat_id); return
@@ -2927,6 +2953,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     send_telegram_message(f"❌ আপনার {dep['amount']} টাকার ডিপোজিট বাতিল করা হয়েছে।", dep["user_id"])
                     break
             else: send_telegram_message("❌ ডিপোজিট পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
     elif text.startswith("/approvewithdraw") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2: send_telegram_message("/approvewithdraw <id>", chat_id); return
@@ -2946,6 +2973,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     else: send_telegram_message("❌ ব্যালেন্স অপর্যাপ্ত।", ADMIN_CHAT_ID)
                     break
             else: send_telegram_message("❌ পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
     elif text.startswith("/rejectwithdraw") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2: send_telegram_message("/rejectwithdraw <id>", chat_id); return
@@ -2959,6 +2987,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                     send_telegram_message(f"❌ আপনার {w['amount']} টাকা উইথড্র বাতিল হয়েছে।", w["user_id"])
                     break
             else: send_telegram_message("❌ পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
     elif text.startswith("/rejectsubmission") and chat_id == ADMIN_CHAT_ID:
         parts = text.split()
         if len(parts) < 2: send_telegram_message("/rejectsubmission <id>", chat_id); return
@@ -2966,6 +2995,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         if reject_submission(sub_id):
             send_telegram_message(f"✅ সাবমিশন {sub_id} রিজেক্ট করা হয়েছে।", ADMIN_CHAT_ID)
         else: send_telegram_message("❌ সাবমিশন পাওয়া যায়নি।", ADMIN_CHAT_ID)
+
     elif text == "/history":
         user_txns = [t for t in transactions if t["user_id"] == chat_id]
         if not user_txns:
@@ -2978,63 +3008,102 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                 date_str = datetime.datetime.fromtimestamp(t["timestamp"]).strftime("%d/%m/%Y %H:%M")
                 lines.append(f"`{date_str}` | {t['description']} | {sign}{t['amount']} টাকা | ব্যালেন্স: {t['balance_after']} টাকা")
             send_telegram_message("\n".join(lines), chat_id, parse_mode="Markdown")
+
     elif text == "/cupgame":
         start_cup_game(chat_id)
+
     elif text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-       parts = text.split()
-    if len(parts) < 2:
-        send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
-        return
-    target_user = parts[1]
-
-    # যদি রিপ্লাই করা মেসেজে মিডিয়া থাকে
-    if msg and msg.get("reply_to_message"):
-        replied = msg["reply_to_message"]
-        if "photo" in replied:
-            file_id = replied["photo"][-1]["file_id"]
-            caption = replied.get("caption", "")
-            resp = get_bot_session().post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                json={"chat_id": target_user, "photo": file_id, "caption": caption}
-            )
-            if resp.status_code == 200:
-                send_telegram_message(f"✅ {target_user} কে ছবি পাঠানো হয়েছে।", chat_id)
-            else:
-                send_telegram_message(f"❌ ছবি পাঠানো যায়নি।", chat_id)
-        elif "voice" in replied:
-            file_id = replied["voice"]["file_id"]
-            resp = get_bot_session().post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
-                json={"chat_id": target_user, "voice": file_id}
-            )
-            if resp.status_code == 200:
-                send_telegram_message(f"✅ {target_user} কে ভয়েস পাঠানো হয়েছে।", chat_id)
-            else:
-                send_telegram_message(f"❌ ভয়েস পাঠানো যায়নি।", chat_id)
-        elif "document" in replied:
-             file_id = replied["document"]["file_id"]
-             caption = replied.get("caption", "")
-             resp = get_bot_session().post(
-                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                 json={"chat_id": target_user, "document": file_id, "caption": caption}
-             )
-            if resp.status_code == 200:
-                send_telegram_message(f"✅ {target_user} কে ফাইল পাঠানো হয়েছে।", chat_id)
-            else:
-                send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
-        else:
-            send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
-     else:
-        # আগের মতো টেক্সট মেসেজ
-        if len(parts) < 3:
-            send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
+        parts = text.split()
+        if len(parts) < 2:
+            send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
             return
-        message_text = " ".join(parts[2:])
-        send_telegram_message(message_text, target_user)
-        send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
+        target_user = parts[1]
 
-   elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
-    # ... তোমার বাকি কোড ...
+        # যদি রিপ্লাই করা মেসেজে মিডিয়া থাকে
+        if msg and msg.get("reply_to_message"):
+            replied = msg["reply_to_message"]
+            if "photo" in replied:
+                file_id = replied["photo"][-1]["file_id"]
+                caption = replied.get("caption", "")
+                resp = get_bot_session().post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                    json={"chat_id": target_user, "photo": file_id, "caption": caption}
+                )
+                if resp.status_code == 200:
+                    send_telegram_message(f"✅ {target_user} কে ছবি পাঠানো হয়েছে।", chat_id)
+                else:
+                    send_telegram_message(f"❌ ছবি পাঠানো যায়নি।", chat_id)
+            elif "voice" in replied:
+                file_id = replied["voice"]["file_id"]
+                resp = get_bot_session().post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice",
+                    json={"chat_id": target_user, "voice": file_id}
+                )
+                if resp.status_code == 200:
+                    send_telegram_message(f"✅ {target_user} কে ভয়েস পাঠানো হয়েছে।", chat_id)
+                else:
+                    send_telegram_message(f"❌ ভয়েস পাঠানো যায়নি।", chat_id)
+            elif "document" in replied:
+                file_id = replied["document"]["file_id"]
+                caption = replied.get("caption", "")
+                resp = get_bot_session().post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                    json={"chat_id": target_user, "document": file_id, "caption": caption}
+                )
+                if resp.status_code == 200:
+                    send_telegram_message(f"✅ {target_user} কে ফাইল পাঠানো হয়েছে।", chat_id)
+                else:
+                    send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
+            else:
+                send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
+        else:
+            # আগের মতো টেক্সট মেসেজ
+            if len(parts) < 3:
+                send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
+                return
+            message_text = " ".join(parts[2:])
+            send_telegram_message(message_text, target_user)
+            send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
+
+    elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
+        if msg and msg.get("reply_to_message") and msg["reply_to_message"].get("document"):
+            file_id = msg["reply_to_message"]["document"]["file_id"]
+            try:
+                s = get_bot_session()
+                file_info = s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}").json()
+                file_path = file_info["result"]["file_path"]
+                content = s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}").content
+                decompressed = gzip.decompress(content)
+                data = json.loads(decompressed.decode('utf-8'))
+                with data_lock:
+                    subscribed_users = set(data.get("subscribed_users", []))
+                    user_info = data.get("user_info", {})
+                    user_balances = data.get("user_balances", {})
+                    game_balances = data.get("game_balances", {})
+                    submissions = data.get("submissions", [])
+                    mother_stock = data.get("mother_stock", [])
+                    mother_accounts = data.get("mother_accounts", [])
+                    config = data.get("config", config)
+                    referrals = data.get("referrals", {})
+                    referral_bonuses = data.get("referral_bonuses", {})
+                    leaderboard = data.get("leaderboard", {})
+                    withdraw_requests = data.get("withdraw_requests", [])
+                    deposit_requests = data.get("deposit_requests", [])
+                    user_last_request = data.get("user_last_request", {})
+                    transactions = data.get("transactions", [])
+                    submitted_usernames = set(data.get("submitted_usernames", []))
+                    user_versions = data.get("user_versions", {})
+                    cupgame_sessions = data.get("cupgame_sessions", {})
+                    bets = data.get("bets", [])
+                    save_all()
+                send_telegram_message("✅ রিস্টোর সফল!", ADMIN_CHAT_ID)
+            except Exception as e:
+                logger.exception("Restore error")
+                send_telegram_message(f"❌ রিস্টোর ব্যর্থ: {e}", ADMIN_CHAT_ID)
+        else:
+            send_telegram_message("❗ দয়া করে একটি `.json.gz` ব্যাকআপ ফাইলে রিপ্লাই দিয়ে `/restore` লিখুন।", ADMIN_CHAT_ID)
+
+    elif text == "/backup" and chat_id == ADMIN_CHAT_ID:
         with data_lock:
             backup_data = {
                 "subscribed_users": list(subscribed_users), "user_info": user_info,
@@ -3055,10 +3124,11 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
                              files={"document": (f"manual_backup_{datetime.datetime.now():%Y%m%d_%H%M%S}.json.gz", compressed, "application/gzip")})
         if resp.ok: send_telegram_message("✅ ব্যাকআপ তৈরি হয়েছে।", ADMIN_CHAT_ID)
         else: send_telegram_message("⚠️ ব্যাকআপ পাঠানো যায়নি।", ADMIN_CHAT_ID)
+
     else:
         if chat_type == "private":
             send_telegram_message("❌ অজানা কমান্ড।", chat_id)
-
+            
 # ================== DAILY TASKS (unchanged) ==================
 def daily_task_loop():
     global last_morning_sent_date, last_evening_sent_date

@@ -2981,7 +2981,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
     elif text == "/cupgame":
         start_cup_game(chat_id)
     elif text.startswith("/send") and chat_id == ADMIN_CHAT_ID:
-    parts = text.split()
+       parts = text.split()
     if len(parts) < 2:
         send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>\nঅথবা কোনো মিডিয়ায় রিপ্লাই দিয়ে /send <user_id>", chat_id)
         return

@@ -3012,19 +3012,19 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
             else:
                 send_telegram_message(f"❌ ভয়েস পাঠানো যায়নি।", chat_id)
         elif "document" in replied:
-            file_id = replied["document"]["file_id"]
-            caption = replied.get("caption", "")
-            resp = get_bot_session().post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                json={"chat_id": target_user, "document": file_id, "caption": caption}
-            )
+             file_id = replied["document"]["file_id"]
+             caption = replied.get("caption", "")
+             resp = get_bot_session().post(
+                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                 json={"chat_id": target_user, "document": file_id, "caption": caption}
+             )
             if resp.status_code == 200:
                 send_telegram_message(f"✅ {target_user} কে ফাইল পাঠানো হয়েছে।", chat_id)
             else:
                 send_telegram_message(f"❌ ফাইল পাঠানো যায়নি।", chat_id)
         else:
             send_telegram_message("❌ রিপ্লাই করা মেসেজে কোনো মিডিয়া (ছবি/ভয়েস/ফাইল) নেই।", chat_id)
-    else:
+     else:
         # আগের মতো টেক্সট মেসেজ
         if len(parts) < 3:
             send_telegram_message("❌ ফরম্যাট: /send <user_id> <মেসেজ>", chat_id)
@@ -3033,7 +3033,7 @@ def handle_commands(chat_id, text, chat_type="private", msg=None):
         send_telegram_message(message_text, target_user)
         send_telegram_message(f"✅ মেসেজ পাঠানো হয়েছে {target_user} কে।", chat_id)
 
-elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
+   elif text == "/restore" and chat_id == ADMIN_CHAT_ID:
     # ... তোমার বাকি কোড ...
         with data_lock:
             backup_data = {

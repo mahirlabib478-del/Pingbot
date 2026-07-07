@@ -18,10 +18,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (ENV VARS) ==================
-BOT_TOKEN = "8808046131:AAGaA7G9YwT7QI4jI-yH53pXwV2xD1YoxOQ"
+BOT_TOKEN = "8734935415:AAG5vN_zkr_NBTWVQwjG1UvEYHMO8jYRmOc"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
-BOT_USERNAME = "Ping478bot"
+BOT_USERNAME = "instagramworksbot"
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_CHAT_ID must be set as environment variables")

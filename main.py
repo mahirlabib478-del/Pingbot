@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG (ENV VARS) ==================
-BOT_TOKEN = "8734935415:AAG5vN_zkr_NBTWVQwjG1UvEYHMO8jYRmOc"
+BOT_TOKEN = "8734935415:AAGwpsPIcaarHF6bSLKnhHhCtXGyqAL46OU"
 ADMIN_CHAT_ID = "2035024902"
 CHANNEL_ID = "-1003903695158"
 BOT_USERNAME = "instagramworksbot"

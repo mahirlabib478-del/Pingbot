@@ -14,6 +14,7 @@ from datetime import datetime
 BOT_TOKEN = "8851844397:AAEyO8xXQGCT_uxtxnLHsIrJHlzXMSLkI0g"
 ADMIN_ID = "2035024902"   # এখানে ADMIN_ID ব্যবহার করুন
 CHANNEL_ID = "-1003903695158"   # ব্যাকআপের জন্য
+BACKUP_CHANNEL_ID = CHANNEL_ID
 
 if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_ID must be set")

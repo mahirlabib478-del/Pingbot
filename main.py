@@ -11,7 +11,7 @@ import requests
 from datetime import datetime
 
 # ========== কনফিগারেশন ==========
-BOT_TOKEN = "8851844397:AAEyO8xXQGCT_uxtxnLHsIrJHlzXMSLkI0g"
+BOT_TOKEN = "8757980176:AAHnpHA3m67Oz3jGdBqVFAB7GgubcD47pWM"
 ADMIN_ID = "2035024902"   # এখানে ADMIN_ID ব্যবহার করুন
 CHANNEL_ID = "-1003903695158"   # ব্যাকআপের জন্য
 BACKUP_CHANNEL_ID = CHANNEL_ID

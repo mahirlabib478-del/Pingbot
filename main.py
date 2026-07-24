@@ -10,14 +10,14 @@ from flask import Flask
 import requests
 from datetime import datetime
 
-# ========== কনফিগারেশন (এনভায়রনমেন্ট) ==========
+# ========== কনফিগারেশন ==========
 BOT_TOKEN = "8851844397:AAEyO8xXQGCT_uxtxnLHsIrJHlzXMSLkI0g"
-ADMIN_CHAT_ID = "2035024902"
-CHANNEL_ID = "-1003903695158"
+ADMIN_ID = "2035024902"   # এখানে ADMIN_ID ব্যবহার করুন
+CHANNEL_ID = "-1003903695158"   # ব্যাকআপের জন্য
 
 if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("BOT_TOKEN and ADMIN_ID must be set")
-
+    
 # ========== ফাইল পাথ ==========
 DATA_FILE = "data.json"
 
